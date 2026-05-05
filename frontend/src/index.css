@@ -1,0 +1,326 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+/*  THEME TOKENS — exact values for guaranteed contrast          */
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+:root, [data-theme="dark"] {
+  /* Text */
+  --text-primary:   #F9FAFB;
+  --text-secondary: #D1D5DB;
+  --text-tertiary:  #6B7280;
+  /* Surfaces */
+  --bg-primary:     #0F0F13;
+  --bg-secondary:   #1A1A24;
+  --bg-tertiary:    #22222F;
+  --bg-hover:       #2A2A3A;
+  /* Borders */
+  --border:         #374151;
+  --border-light:   #2E2E40;
+  /* Inputs */
+  --input-bg:       #1F1F2E;
+  --input-border:   #374151;
+  --input-text:     #F9FAFB;
+  --input-placeholder: #6B7280;
+  /* Accent (purple) */
+  --accent:         #7C3AED;
+  --accent-hover:   #6D28D9;
+  --accent-dim:     rgba(124, 58, 237, 0.18);
+  /* Semantic — exact values from spec */
+  --success:        #10B981;
+  --success-bg:     #064E3B;
+  --success-fg:     #6EE7B7;
+  --warning:        #F59E0B;
+  --warning-bg:     #78350F;
+  --warning-fg:     #FCD34D;
+  --danger:         #EF4444;
+  --danger-bg:      #7F1D1D;
+  --danger-fg:      #FCA5A5;
+  --info:           #3B82F6;
+  --info-bg:        #1E3A5F;
+  --info-fg:        #93C5FD;
+  --purple-bg:      #2E1065;
+  --purple-fg:      #C4B5FD;
+  /* Dim variants for chart fills/gradients */
+  --success-dim:    rgba(16, 185, 129, 0.15);
+  --warning-dim:    rgba(245, 158, 11, 0.15);
+  --danger-dim:     rgba(239, 68, 68, 0.15);
+  --info-dim:       rgba(59, 130, 246, 0.15);
+  --card-shadow:    0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="light"] {
+  /* Text */
+  --text-primary:   #111827;
+  --text-secondary: #4B5563;
+  --text-tertiary:  #9CA3AF;
+  /* Surfaces */
+  --bg-primary:     #F8F7FF;
+  --bg-secondary:   #FFFFFF;
+  --bg-tertiary:    #F3F0FF;
+  --bg-hover:       #EDE9FE;
+  /* Borders */
+  --border:         #E5E7EB;
+  --border-light:   #F3F4F6;
+  /* Inputs */
+  --input-bg:       #FFFFFF;
+  --input-border:   #D1D5DB;
+  --input-text:     #111827;
+  --input-placeholder: #9CA3AF;
+  /* Accent (purple) — slightly darker for AA contrast on white */
+  --accent:         #6D28D9;
+  --accent-hover:   #5B21B6;
+  --accent-dim:     rgba(124, 58, 237, 0.10);
+  /* Semantic — exact values from spec */
+  --success:        #059669;
+  --success-bg:     #D1FAE5;
+  --success-fg:     #065F46;
+  --warning:        #D97706;
+  --warning-bg:     #FEF3C7;
+  --warning-fg:     #92400E;
+  --danger:         #DC2626;
+  --danger-bg:      #FEE2E2;
+  --danger-fg:      #991B1B;
+  --info:           #2563EB;
+  --info-bg:        #DBEAFE;
+  --info-fg:        #1E40AF;
+  --purple-bg:      #EDE9FE;
+  --purple-fg:      #5B21B6;
+  /* Dim variants */
+  --success-dim:    rgba(5, 150, 105, 0.10);
+  --warning-dim:    rgba(217, 119, 6, 0.10);
+  --danger-dim:     rgba(220, 38, 38, 0.10);
+  --info-dim:       rgba(37, 99, 235, 0.10);
+  --card-shadow:    0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(124, 58, 237, 0.04);
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+/*  Base                                                         */
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+* { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+html, body, #root { height: 100%; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  transition: background-color 200ms ease, color 200ms ease;
+}
+
+* { box-sizing: border-box; }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+  border: 2px solid var(--bg-primary);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+
+/* Form autofill */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-text-fill-color: var(--input-text) !important;
+  -webkit-box-shadow: 0 0 0 1000px var(--input-bg) inset !important;
+  caret-color: var(--input-text);
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+::selection { background: var(--accent); color: white; }
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+/*  Component classes                                            */
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+.fp-card {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--card-shadow);
+}
+
+.fp-input {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--input-text);
+  width: 100%;
+  transition: border-color 150ms, box-shadow 150ms;
+}
+.fp-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.fp-input::placeholder { color: var(--input-placeholder); }
+
+/* Buttons — text color is preserved on hover (only bg changes) */
+.fp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, opacity 150ms ease;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+.fp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.fp-btn-primary { background: var(--accent); color: #FFFFFF; }
+.fp-btn-primary:hover:not(:disabled) { background: var(--accent-hover); color: #FFFFFF; }
+
+.fp-btn-secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+.fp-btn-secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);  /* preserve text color */
+}
+
+.fp-btn-ghost { background: transparent; color: var(--text-secondary); }
+.fp-btn-ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.fp-btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.fp-btn-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #FFFFFF;
+}
+
+.fp-btn-success { background: var(--success); color: #FFFFFF; }
+.fp-btn-success:hover:not(:disabled) { filter: brightness(1.1); color: #FFFFFF; }
+
+/* Badges — use exact theme-aware colors */
+.fp-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.fp-badge-success { background: var(--success-bg); color: var(--success-fg); border-color: transparent; }
+.fp-badge-warning { background: var(--warning-bg); color: var(--warning-fg); border-color: transparent; }
+.fp-badge-danger  { background: var(--danger-bg);  color: var(--danger-fg);  border-color: transparent; }
+.fp-badge-info    { background: var(--info-bg);    color: var(--info-fg);    border-color: transparent; }
+.fp-badge-accent  { background: var(--purple-bg);  color: var(--purple-fg);  border-color: transparent; }
+.fp-badge-neutral { background: var(--bg-tertiary); color: var(--text-secondary); border-color: var(--border); }
+
+/* Tables */
+.fp-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.fp-table thead th {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.fp-table tbody tr {
+  border-bottom: 1px solid var(--border-light);
+  transition: background 100ms;
+}
+.fp-table tbody tr:hover { background: var(--bg-hover); }
+.fp-table tbody tr.clickable { cursor: pointer; }
+.fp-table td {
+  padding: 10px 14px;
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+.fp-table tbody tr:hover td { color: var(--text-primary); }
+
+/* KPI cards */
+.fp-kpi {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 14px;
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  color: var(--text-primary);
+}
+.fp-kpi::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, var(--accent-dim) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+.fp-kpi > * { position: relative; z-index: 1; }
+
+/* Animations */
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+@keyframes fadeIn   { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp  { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes spin     { to { transform: rotate(360deg); } }
+@keyframes float-slow {
+  0%, 100% { transform: translate(0, 0); }
+  33%      { transform: translate(40px, -30px); }
+  66%      { transform: translate(-30px, 40px); }
+}
+
+.fp-slide-in     { animation: slideInRight 300ms cubic-bezier(0.4, 0, 0.2, 1); }
+.fp-fade-in      { animation: fadeIn 200ms ease; }
+.fp-slide-up     { animation: slideUp 200ms ease; }
+.fp-spin         { animation: spin 800ms linear infinite; }
+.fp-orb          { animation: float-slow 8s ease infinite; }
+
+/* Login gradient panel */
+.fp-login-gradient {
+  background: linear-gradient(135deg, #1E0A40 0%, #3B0F7A 50%, #5B21B6 100%);
+}
+.fp-login-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* Recharts overrides */
+.recharts-tooltip-wrapper { outline: none !important; }
+
+/* Print */
+@media print {
+  body { background: white !important; color: black !important; }
+  aside, .no-print { display: none !important; }
+}
