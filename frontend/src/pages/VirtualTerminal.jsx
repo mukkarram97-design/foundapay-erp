@@ -89,15 +89,17 @@ export default function VirtualTerminal() {
     if (!selectedClient || !form.payment_method) return;
     const f = METHOD_FIELDS[form.payment_method];
     if (!f) return;
-    setForm((s) => ({ ...s, foundapay_fee_pct: (parseFloat(selectedClient[f]) || 0).toString(), counterparty_name: s.counterparty_name || selectedClient.name }));
+    // Display fee as percentage (decimal × 100) e.g. 0.30 → "30.00"
+    setForm((s) => ({ ...s, foundapay_fee_pct: ((parseFloat(selectedClient[f]) || 0) * 100).toFixed(2), counterparty_name: s.counterparty_name || selectedClient.name }));
     // eslint-disable-next-line
   }, [form.client_id, form.payment_method]);
 
   const calc = useMemo(() => {
     const gross = parseFloat(form.gross_amount) || 0;
-    const feePct = parseFloat(form.foundapay_fee_pct) || 0;
+    // Form holds percentage display ("30"); divide by 100 for the multiplier
+    const feePctDecimal = (parseFloat(form.foundapay_fee_pct) || 0) / 100;
     const mc = parseFloat(form.merchant_charges) || 0;
-    const commission = gross * feePct;
+    const commission = gross * feePctDecimal;
 
     let reserve = 0;
     let reserveLabel = null;
@@ -125,7 +127,8 @@ export default function VirtualTerminal() {
       const payload = {
         ...form,
         gross_amount: parseFloat(form.gross_amount),
-        foundapay_fee_pct: parseFloat(form.foundapay_fee_pct) || 0,
+        // Form holds percentage; backend stores decimal
+        foundapay_fee_pct: (parseFloat(form.foundapay_fee_pct) || 0) / 100,
         merchant_charges: parseFloat(form.merchant_charges) || 0,
         client_id: form.client_id || null,
         entity_id: form.entity_id || null,
@@ -359,7 +362,7 @@ export default function VirtualTerminal() {
           <Card className="p-5">
             <h3 className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-secondary)' }}>Live calculation</h3>
             <Row label="Gross">{money(calc.gross)}</Row>
-            <Row label="− Commission" sub={form.foundapay_fee_pct ? `${(parseFloat(form.foundapay_fee_pct) * 100).toFixed(2)}%` : null} negative>{money(calc.commission)}</Row>
+            <Row label="− Commission" sub={form.foundapay_fee_pct ? `${parseFloat(form.foundapay_fee_pct).toFixed(2)}%` : null} negative>{money(calc.commission)}</Row>
             {calc.mc > 0 && form.bearing_merchant_charges === 'Client' && (
               <Row label="− Merchant charges" negative>{money(calc.mc)}</Row>
             )}

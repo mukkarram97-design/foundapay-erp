@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { pool } = require('../db');
 const { authRequired, requireRole } = require('../middleware/auth');
@@ -8,6 +9,15 @@ const router = express.Router();
 router.use(authRequired);
 router.use(requireRole('super_admin', 'owner', 'admin'));
 
+// Inline guard: must be super_admin OR admin (excludes owner) — used by toggle/resend
+function requireSuperOrAdmin(req, res, next) {
+  if (!['super_admin', 'admin'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Forbidden: super_admin or admin required' });
+  }
+  next();
+}
+
+// ── GET /api/users ───────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const r = await pool.query(`
@@ -23,6 +33,7 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── POST /api/users ──────────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
     const b = req.body || {};
@@ -48,6 +59,7 @@ router.post('/', async (req, res) => {
   }
 });
 
+// ── PATCH /api/users/:id ─────────────────────────────────────
 router.patch('/:id', async (req, res) => {
   try {
     const b = req.body || {};
@@ -70,6 +82,143 @@ router.patch('/:id', async (req, res) => {
     if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(r.rows[0]);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /api/users/:id/toggle-active ───────────────────────
+// super_admin or admin; cannot deactivate self or any super_admin
+router.patch('/:id/toggle-active', requireSuperOrAdmin, async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    if (targetId === req.user.id) {
+      return res.status(403).json({ error: 'Cannot deactivate yourself' });
+    }
+    const cur = await pool.query(
+      'SELECT id, name, email, role, is_active FROM users WHERE id = $1',
+      [targetId]
+    );
+    if (!cur.rows.length) return res.status(404).json({ error: 'User not found' });
+    const target = cur.rows[0];
+    if (target.role === 'super_admin') {
+      return res.status(403).json({ error: 'Cannot toggle a super_admin' });
+    }
+    const newActive = !target.is_active;
+    await pool.query(
+      'UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2',
+      [newActive, targetId]
+    );
+    // Invalidate any active reset tokens if deactivating
+    if (!newActive) {
+      await pool.query(
+        'UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false',
+        [targetId]
+      );
+    }
+    await pool.query(`
+      INSERT INTO audit_logs (user_id, action, resource, resource_id, old_value, new_value, ip_address)
+      VALUES ($1, $2, 'users', $3, $4, $5, $6)
+    `, [
+      req.user.id,
+      newActive ? 'ACTIVATE_USER' : 'DEACTIVATE_USER',
+      targetId,
+      JSON.stringify({ is_active: target.is_active }),
+      JSON.stringify({ is_active: newActive }),
+      req.ip || null,
+    ]);
+    res.json({
+      id: target.id,
+      name: target.name,
+      is_active: newActive,
+      message: newActive ? 'User activated' : 'User deactivated',
+    });
+  } catch (err) {
+    console.error('[users/toggle-active]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── DELETE /api/users/:id ────────────────────────────────────
+// super_admin only; soft-delete (preserves audit trail)
+router.delete('/:id', requireRole('super_admin'), async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    if (targetId === req.user.id) {
+      return res.status(403).json({ error: 'Cannot delete yourself' });
+    }
+    const cur = await pool.query(
+      'SELECT id, name, email, role, is_active FROM users WHERE id = $1',
+      [targetId]
+    );
+    if (!cur.rows.length) return res.status(404).json({ error: 'User not found' });
+    const target = cur.rows[0];
+    if (target.role === 'super_admin') {
+      return res.status(403).json({ error: 'Cannot delete another super_admin' });
+    }
+    const deletedEmail = `deleted_${targetId}@deleted.com`;
+    await pool.query(`
+      UPDATE users
+         SET is_active = false,
+             email = $1,
+             updated_at = NOW()
+       WHERE id = $2
+    `, [deletedEmail, targetId]);
+    // Invalidate sessions/reset tokens
+    await pool.query(
+      'UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false',
+      [targetId]
+    );
+    await pool.query(`
+      INSERT INTO audit_logs (user_id, action, resource, resource_id, old_value, ip_address)
+      VALUES ($1, 'DELETE_USER', 'users', $2, $3, $4)
+    `, [req.user.id, targetId, JSON.stringify(target), req.ip || null]);
+    res.json({
+      message: `User ${target.name || target.email} deleted`,
+      id: targetId,
+    });
+  } catch (err) {
+    console.error('[users/delete]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/users/:id/resend-invite ────────────────────────
+// super_admin or admin; rotates password, sends welcome email
+router.post('/:id/resend-invite', requireSuperOrAdmin, async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const cur = await pool.query(
+      'SELECT id, email, name, is_active FROM users WHERE id = $1',
+      [targetId]
+    );
+    if (!cur.rows.length) return res.status(404).json({ error: 'User not found' });
+    const target = cur.rows[0];
+    if (!target.is_active) {
+      return res.status(400).json({ error: 'User is inactive — activate first' });
+    }
+    const tempPassword = crypto.randomBytes(8).toString('hex');
+    const newHash = await bcrypt.hash(tempPassword, 12);
+    await pool.query(
+      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+      [newHash, targetId]
+    );
+    await pool.query(`
+      INSERT INTO audit_logs (user_id, action, resource, resource_id, ip_address)
+      VALUES ($1, 'RESEND_INVITE', 'users', $2, $3)
+    `, [req.user.id, targetId, req.ip || null]);
+
+    // Fire-and-forget email — never fail the request because of mail
+    email.sendWelcome(target.email, target.name || target.email, tempPassword).catch((e) => {
+      console.warn('[users/resend-invite] email send failed:', e.message);
+    });
+
+    res.json({
+      message: `Invite resent to ${target.email}`,
+      // expose the new temp password to the admin in case the email never arrives
+      temp_password: tempPassword,
+    });
+  } catch (err) {
+    console.error('[users/resend-invite]', err);
     res.status(500).json({ error: err.message });
   }
 });

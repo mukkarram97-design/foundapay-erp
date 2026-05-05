@@ -1,0 +1,348 @@
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Public payment routes — NO authentication required.
+// These are hit by customers paying via a self-hosted payment link.
+//
+//   GET  /pay/:token         → renders the Accept.js HTML page
+//   POST /api/pay/process    → charges via Authorize.net using the
+//                              Accept.js opaque-data nonce + token amount
+//
+// Security:
+//   - Token is HMAC-SHA256 signed (see authorizeNet.signPayload/verifyToken)
+//   - Amount is read from the verified token, never from the client request
+//   - Token has an exp; expired tokens return 410 Gone
+//   - HTML output escapes all user-controllable values
+//   - Card data never reaches us — Accept.js tokenises in the browser
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const express = require('express');
+const { pool } = require('../db');
+const authNet = require('../services/processors/authorizeNet');
+
+const router = express.Router();
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[<>&"']/g, (c) => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[c]));
+}
+
+function fmtMoney(n) {
+  const v = parseFloat(n) || 0;
+  return v.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+}
+
+function expiredHtml(brandName) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Link expired</title>
+<style>body{font-family:-apple-system,sans-serif;background:#f8f7ff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
+.c{background:white;border-radius:16px;padding:40px;max-width:420px;text-align:center;box-shadow:0 4px 24px rgba(124,58,237,0.12)}
+h1{color:#dc2626;margin:0 0 8px;font-size:22px}p{color:#6b7280;margin:8px 0}.brand{color:#7C3AED;font-weight:700;margin-bottom:16px}
+</style></head><body><div class="c"><div class="brand">${esc(brandName || 'FoundaPay')}</div>
+<h1>⏱ This payment link has expired</h1>
+<p>Please request a new payment link from the merchant.</p></div></body></html>`;
+}
+
+function notFoundHtml() {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Not found</title>
+<style>body{font-family:-apple-system,sans-serif;background:#f8f7ff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
+.c{background:white;border-radius:16px;padding:40px;max-width:420px;text-align:center;box-shadow:0 4px 24px rgba(124,58,237,0.12)}
+h1{color:#dc2626;margin:0;font-size:22px}p{color:#6b7280;margin-top:12px}
+</style></head><body><div class="c"><h1>Invalid payment link</h1>
+<p>This payment link is invalid or has been revoked.</p></div></body></html>`;
+}
+
+function processorErrorHtml(brandName, errorText, errorCode) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Payment temporarily unavailable</title>
+<style>body{font-family:-apple-system,sans-serif;background:#f8f7ff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
+.c{background:white;border-radius:16px;padding:40px;max-width:460px;text-align:center;box-shadow:0 4px 24px rgba(124,58,237,0.12)}
+h1{color:#b45309;margin:0 0 8px;font-size:22px}p{color:#6b7280;margin:8px 0;line-height:1.5}.brand{color:#7C3AED;font-weight:700;margin-bottom:16px}
+small{color:#9ca3af;font-size:11px;font-family:ui-monospace,monospace;margin-top:14px;display:block}
+</style></head><body><div class="c"><div class="brand">${esc(brandName || 'FoundaPay')}</div>
+<h1>Payment temporarily unavailable</h1>
+<p>We couldn't reach the payment processor right now. Please try again in a few moments, or contact the merchant for a fresh link.</p>
+${errorCode ? `<small>Reference: ${esc(errorCode)} — ${esc(errorText || '')}</small>` : ''}
+</div></body></html>`;
+}
+
+// ━━━ GET /pay/:token — verify our token, then either render Accept.js
+//                       on our domain OR lazily mint a fresh Authorize.net
+//                       hosted-page token and 302-redirect to it. ━━━
+//
+// Why lazy: Authorize.net hosted-page tokens are valid for ~15 minutes
+// upstream. A pre-generated link sent in an email is dead by the time the
+// customer reads it. By regenerating on click we make the customer-facing
+// link's lifetime equal to OUR token's TTL (24h by default).
+router.get('/pay/:token', async (req, res) => {
+  let payload;
+  try {
+    payload = authNet.verifyToken(req.params.token);
+  } catch (e) {
+    if (e.code === 'EXPIRED') {
+      res.status(410).type('html').send(expiredHtml(null));
+      return;
+    }
+    res.status(404).type('html').send(notFoundHtml());
+    return;
+  }
+
+  // ━━━ Lazy upstream regen path ━━━
+  // Default behavior unless the merchant explicitly chose self_hosted (Accept.js).
+  const method = payload.method || 'auto';
+  if (method === 'auto' || method === 'hosted_redirect') {
+    const hosted = await authNet.generateHostedPaymentLink({
+      amount: payload.amount,
+      description: payload.description,
+      invoiceNumber: payload.invoiceNumber,
+      email: payload.customerEmail,
+      brandName: payload.brandName,
+      returnUrl: payload.returnUrl || undefined,
+      refId: payload.invoiceNumber, // echoed in webhook for correlation
+    });
+
+    if (hosted.success) {
+      // Don't cache the redirect — every click must mint a fresh upstream token.
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.redirect(302, hosted.hostedUrl);
+      return;
+    }
+
+    // Upstream failed.
+    if (method === 'hosted_redirect') {
+      console.error(
+        `[pay/:token] upstream hosted-page failed (hosted_redirect mode) refId=${hosted.refId} code=${hosted.errorCode} text=${hosted.errorText}`
+      );
+      res.status(502).type('html').send(
+        processorErrorHtml(payload.brandName, hosted.errorText, hosted.errorCode)
+      );
+      return;
+    }
+    // method === 'auto' — fall through to Accept.js so the customer can still pay.
+    console.warn(
+      `[pay/:token] upstream hosted-page failed in auto mode, falling back to Accept.js. refId=${hosted.refId} code=${hosted.errorCode} text=${hosted.errorText}`
+    );
+  }
+
+  // ━━━ Self-hosted Accept.js path ━━━
+  const apiLoginId = process.env.AUTHNET_LOGIN_ID || '';
+  const publicClientKey = process.env.AUTHNET_PUBLIC_CLIENT_KEY || '';
+  const acceptUiSrc = process.env.AUTHNET_SANDBOX === 'true'
+    ? 'https://jstest.authorize.net/v3/AcceptUI.js'
+    : 'https://js.authorize.net/v3/AcceptUI.js';
+
+  const amount = parseFloat(payload.amount).toFixed(2);
+  const amountFmt = fmtMoney(payload.amount);
+
+  // CSP relaxation: AcceptUI loads from authorize.net + popups inline scripts
+  res.setHeader('Content-Security-Policy', "default-src 'self' https://*.authorize.net; script-src 'self' 'unsafe-inline' https://*.authorize.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.authorize.net; frame-src 'self' https://*.authorize.net; connect-src 'self' https://*.authorize.net");
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${esc(payload.brandName)} — Secure Payment</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="${acceptUiSrc}" charset="utf-8"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(135deg,#f8f7ff 0%,#ede9fe 100%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;color:#1a1027}
+    .card{background:white;border-radius:16px;padding:32px;max-width:440px;width:100%;box-shadow:0 8px 32px rgba(124,58,237,0.16)}
+    .brand{font-size:20px;font-weight:700;color:#7C3AED;margin-bottom:6px}
+    .label{font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-top:24px;margin-bottom:4px}
+    .amount{font-size:42px;font-weight:700;color:#1a1027;line-height:1;margin:6px 0}
+    .meta{color:#6b7280;font-size:13px;margin-top:6px}
+    .invoice{font-family:ui-monospace,monospace;font-size:12px;color:#9ca3af;margin-top:4px}
+    .pay-row{margin-top:24px}
+    button.AcceptUI{background:linear-gradient(135deg,#7C3AED 0%,#6D28D9 100%)!important;color:white!important;border:none!important;border-radius:12px!important;padding:14px 24px!important;font-size:16px!important;font-weight:600!important;cursor:pointer!important;width:100%!important;letter-spacing:0.01em!important;transition:transform 200ms,box-shadow 200ms!important}
+    button.AcceptUI:hover{transform:translateY(-1px);box-shadow:0 8px 20px rgba(124,58,237,0.35)!important}
+    .secure{text-align:center;color:#9ca3af;font-size:11px;margin-top:18px}
+    .secure b{color:#6b7280}
+    .err{background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;border-radius:10px;padding:10px 12px;margin-top:14px;font-size:13px;display:none}
+    .err.show{display:block}
+    .pending{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;z-index:1000}
+    .pending.show{display:flex}
+    .pending div{background:white;border-radius:14px;padding:24px 32px;font-weight:600;color:#1a1027}
+    .ok{text-align:center;padding:20px 0}
+    .ok h1{color:#10B981;font-size:28px;margin-bottom:8px}
+    .ok p{color:#4b5563;margin-top:6px;font-size:14px}
+    .ok code{font-family:ui-monospace,monospace;color:#7C3AED;background:#f3f0ff;padding:2px 6px;border-radius:4px;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <div class="brand">${esc(payload.brandName)}</div>
+    <div class="label">Amount due</div>
+    <div class="amount">${esc(amountFmt)}</div>
+    <div class="meta">${esc(payload.description || 'Payment')}</div>
+    <div class="invoice">Invoice: ${esc(payload.invoiceNumber)}</div>
+
+    <div class="pay-row">
+      <button
+        type="button"
+        class="AcceptUI"
+        data-billingAddressOptions='{"show":true,"required":false}'
+        data-apiLoginID="${esc(apiLoginId)}"
+        data-clientKey="${esc(publicClientKey)}"
+        data-acceptUIFormBtnTxt="Pay ${esc(amountFmt)}"
+        data-acceptUIFormHeaderTxt="Secure Payment"
+        data-paymentOptions='{"showCreditCard":true,"showBankAccount":false}'
+        data-responseHandler="responseHandler">
+        Pay ${esc(amountFmt)}
+      </button>
+    </div>
+
+    <div id="err" class="err"></div>
+
+    <div class="secure" style="margin-top:24px">🔒 <b>Card data is sent directly to Authorize.net.</b></div>
+    <div class="secure" style="margin-top:4px">Your card never touches FoundaPay's servers.</div>
+    <div class="secure" style="margin-top:14px">Powered by <b>FoundaPay</b></div>
+  </div>
+
+  <div class="pending" id="pending"><div>Processing payment…</div></div>
+
+  <script>
+    var TOKEN = ${JSON.stringify(req.params.token)};
+    var AMOUNT = ${JSON.stringify(amount)};
+    var BRAND = ${JSON.stringify(payload.brandName)};
+
+    function showError(msg) {
+      var e = document.getElementById('err');
+      e.textContent = msg;
+      e.classList.add('show');
+    }
+
+    function responseHandler(response) {
+      if (response.messages.resultCode === 'Error') {
+        showError(response.messages.message[0].text || 'Payment error');
+        return;
+      }
+      document.getElementById('pending').classList.add('show');
+
+      fetch('/api/pay/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: TOKEN,
+          dataDescriptor: response.opaqueData.dataDescriptor,
+          dataValue: response.opaqueData.dataValue,
+          customer: {
+            firstName: response.customerInformation && response.customerInformation.firstName || '',
+            lastName: response.customerInformation && response.customerInformation.lastName || '',
+            email: response.customerInformation && response.customerInformation.email || ''
+          }
+        })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(result) {
+        document.getElementById('pending').classList.remove('show');
+        if (result.success) {
+          document.getElementById('card').innerHTML =
+            '<div class="ok">' +
+              '<h1>✓ Payment Successful</h1>' +
+              '<p>Thank you. Your payment of <b>' + (result.amountFmt || '') + '</b> has been received.</p>' +
+              (result.authCode ? '<p style="margin-top:14px">Auth code: <code>' + result.authCode + '</code></p>' : '') +
+              (result.transactionId ? '<p>Transaction ID: <code>' + result.transactionId + '</code></p>' : '') +
+              '<p style="margin-top:18px;font-size:12px;color:#9ca3af">' + BRAND + '</p>' +
+            '</div>';
+          window.scrollTo(0, 0);
+        } else {
+          showError(result.message || 'Payment was declined.');
+        }
+      })
+      .catch(function(err) {
+        document.getElementById('pending').classList.remove('show');
+        showError('Network error. Please try again.');
+      });
+    }
+  </script>
+</body>
+</html>`);
+});
+
+// ━━━ POST /api/pay/process — charge using Accept.js nonce ━━━
+router.post('/api/pay/process', express.json(), async (req, res) => {
+  try {
+    const { token, dataDescriptor, dataValue, customer } = req.body || {};
+    if (!token || !dataDescriptor || !dataValue) {
+      return res.status(400).json({ success: false, message: 'Missing token or payment data' });
+    }
+
+    let payload;
+    try {
+      payload = authNet.verifyToken(token);
+    } catch (e) {
+      if (e.code === 'EXPIRED') {
+        return res.status(410).json({ success: false, message: 'This payment link has expired.' });
+      }
+      return res.status(400).json({ success: false, message: 'Invalid payment link' });
+    }
+
+    // Server-truth amount from token
+    const amount = parseFloat(payload.amount);
+    if (!isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid amount on token' });
+    }
+
+    const result = await authNet.chargeWithOpaqueData({
+      amount,
+      dataDescriptor,
+      dataValue,
+      firstName: customer?.firstName || '',
+      lastName:  customer?.lastName || '',
+      email:     customer?.email || payload.customerEmail || '',
+      description: payload.description,
+      invoiceNumber: payload.invoiceNumber,
+    });
+
+    // Persist VT row regardless of success — for audit
+    try {
+      await pool.query(`
+        INSERT INTO vt_transactions
+          (processor, processor_transaction_id, processor_auth_code,
+           processor_response_code, processor_response_text,
+           card_last4, card_type, card_holder_name, customer_email,
+           amount, charge_type, status, hosted_link_token,
+           invoice_number, description, brand_name)
+        VALUES ('authorize_net',$1,$2,$3,$4,$5,$6,$7,$8,$9,'hosted_link',$10,$11,$12,$13,$14)
+      `, [
+        result.transactionId || null, result.authCode || null,
+        result.responseCode || null,
+        result.success ? 'Approved (self-hosted)' : (result.message || 'Declined'),
+        result.last4 || null,
+        result.accountType || null,
+        `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim() || null,
+        customer?.email || payload.customerEmail || null,
+        amount.toFixed(2),
+        result.success ? 'success' : 'declined',
+        token.slice(0, 200),
+        payload.invoiceNumber, payload.description, payload.brandName,
+      ]);
+    } catch (dbErr) {
+      console.warn('[pay/process] vt_transactions insert failed:', dbErr.message);
+    }
+
+    if (!result.success) {
+      return res.json({ success: false, message: result.message || 'Payment declined' });
+    }
+
+    res.json({
+      success: true,
+      transactionId: result.transactionId,
+      authCode: result.authCode,
+      last4: result.last4,
+      amount: amount.toFixed(2),
+      amountFmt: fmtMoney(amount),
+      message: result.message,
+    });
+  } catch (err) {
+    console.error('[pay/process]', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+module.exports = router;

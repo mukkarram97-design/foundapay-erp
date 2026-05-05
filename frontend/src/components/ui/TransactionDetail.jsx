@@ -13,11 +13,20 @@ export default function TransactionDetail({ tx, onClose, onSaved, onDeleted, cli
   const { user } = useAuth();
   // Initialize form synchronously so it's never null on first render —
   // this fixes the Rules-of-Hooks violation that previously blanked the modal.
-  const [form, setForm] = useState(() => tx ? { ...tx, date_received: dateOnly(tx.date_received) } : {});
+  // Convert foundapay_fee_pct from DB decimal (0.30) → display percent ("30")
+  const fromTx = (t) => t ? {
+    ...t,
+    date_received: dateOnly(t.date_received),
+    foundapay_fee_pct: t.foundapay_fee_pct != null
+      ? (parseFloat(t.foundapay_fee_pct) * 100).toFixed(2)
+      : '',
+  } : {};
+  const [form, setForm] = useState(() => fromTx(tx));
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (tx) setForm({ ...tx, date_received: dateOnly(tx.date_received) });
+    if (tx) setForm(fromTx(tx));
+    // eslint-disable-next-line
   }, [tx]);
 
   const isCreate = !tx?.id;
@@ -33,7 +42,8 @@ export default function TransactionDetail({ tx, onClose, onSaved, onDeleted, cli
     if (!c) return;
     const map = { 'Debit/Credit Cards': 'card_pct', ACH: 'ach_pct', 'Wire Transfer': 'wire_pct', Cheque: 'cheque_pct', Zelle: 'zelle_pct' };
     const f = map[method];
-    if (f) setForm((s) => ({ ...s, foundapay_fee_pct: c[f] || 0 }));
+    // Auto-fill: client.card_pct is decimal (0.30) → display as "30.00"
+    if (f) setForm((s) => ({ ...s, foundapay_fee_pct: ((parseFloat(c[f]) || 0) * 100).toFixed(2) }));
     // eslint-disable-next-line
   }, [form?.client_id, form?.payment_method]);
 
@@ -42,7 +52,9 @@ export default function TransactionDetail({ tx, onClose, onSaved, onDeleted, cli
   const canDelete = ['super_admin', 'owner'].includes(user?.role);
 
   const gross = parseFloat(form.gross_amount) || 0;
-  const feePct = parseFloat(form.foundapay_fee_pct) || 0;
+  // form.foundapay_fee_pct is in display units ("30") — divide by 100 for the multiplier
+  const feePctDisplay = parseFloat(form.foundapay_fee_pct) || 0;
+  const feePct = feePctDisplay / 100;
   const mc = parseFloat(form.merchant_charges) || 0;
   const commission = gross * feePct;
   const reservePct = parseFloat(form.reserve_pct) || 0;

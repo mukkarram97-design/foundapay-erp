@@ -8,6 +8,10 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:5001',
         changeOrigin: true
+      },
+      '/pay': {
+        target: 'http://localhost:5001',
+        changeOrigin: true
       }
     }
   },

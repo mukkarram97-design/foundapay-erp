@@ -29,6 +29,7 @@ const partnersRoutes     = require('./src/routes/partners');
 const globalSearchRoutes = require('./src/routes/globalSearch');
 const notificationsRoutes= require('./src/routes/notifications');
 const virtualTerminalRoutes = require('./src/routes/virtualTerminal');
+const paymentsRoutes        = require('./src/routes/payments');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -36,6 +37,11 @@ const PORT = process.env.PORT || 5001;
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Public payment routes — NO auth (mounted before any auth-required routes)
+//   GET /pay/:token       → Accept.js HTML page
+//   POST /api/pay/process → charge using Accept.js nonce
+app.use('/', paymentsRoutes);
 
 // Health check
 app.get('/api/health', async (req, res) => {
@@ -73,6 +79,7 @@ app.use('/api/payroll',        salaryRoutes); // alias to salary
 app.use('/api/global-search',  globalSearchRoutes);
 app.use('/api/notifications',  notificationsRoutes);
 app.use('/api/virtual-terminal', virtualTerminalRoutes);
+app.use('/api/vt',               virtualTerminalRoutes);  // shorthand alias
 
 // 404 for any other /api/*
 app.use('/api', (req, res) => {

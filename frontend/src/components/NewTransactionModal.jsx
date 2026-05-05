@@ -85,20 +85,23 @@ export default function NewTransactionModal({ onClose, onSaved, defaultClientId 
     if (!selectedClient || !form.payment_method) return;
     const f = METHOD_FIELDS[form.payment_method];
     if (!f) return;
+    // Display as percentage (decimal × 100). e.g. 0.30 → "30.00"
     setForm((s) => ({
       ...s,
-      foundapay_fee_pct: (parseFloat(selectedClient[f]) || 0).toString(),
+      foundapay_fee_pct: ((parseFloat(selectedClient[f]) || 0) * 100).toFixed(2),
       counterparty_name: s.counterparty_name || selectedClient.name,
     }));
     // eslint-disable-next-line
   }, [form.client_id, form.payment_method]);
 
   // Live calculation — runs on every input change
+  // foundapay_fee_pct is stored in form as PERCENTAGE display (e.g. "30")
+  // so divide by 100 to get the decimal multiplier.
   const calc = useMemo(() => {
     const gross = parseFloat(form.gross_amount) || 0;
-    const feePct = parseFloat(form.foundapay_fee_pct) || 0;
+    const feePctDecimal = (parseFloat(form.foundapay_fee_pct) || 0) / 100;
     const mc = parseFloat(form.merchant_charges) || 0;
-    const commission = gross * feePct;
+    const commission = gross * feePctDecimal;
 
     let reserve = 0;
     let reserveLabel = null;
@@ -136,7 +139,8 @@ export default function NewTransactionModal({ onClose, onSaved, defaultClientId 
         merchant_account: form.merchant_account || null,
         external_txn_id: form.external_txn_id || null,
         gross_amount: parseFloat(form.gross_amount),
-        foundapay_fee_pct: parseFloat(form.foundapay_fee_pct) || 0,
+        // Form holds the percentage display ("30"); backend stores decimal (0.30)
+        foundapay_fee_pct: (parseFloat(form.foundapay_fee_pct) || 0) / 100,
         fee_amount: calc.commission,
         merchant_charges: parseFloat(form.merchant_charges) || 0,
         bearing_merchant_charges: form.bearing_merchant_charges,
@@ -356,7 +360,7 @@ export default function NewTransactionModal({ onClose, onSaved, defaultClientId 
               <CalcRow label="Gross" value={money(calc.gross)} />
               <CalcRow
                 label="− Commission"
-                sub={form.foundapay_fee_pct ? `${(parseFloat(form.foundapay_fee_pct) * 100).toFixed(2)}% of gross` : null}
+                sub={form.foundapay_fee_pct ? `${parseFloat(form.foundapay_fee_pct).toFixed(2)}% of gross` : null}
                 value={money(calc.commission)}
                 muted
               />
