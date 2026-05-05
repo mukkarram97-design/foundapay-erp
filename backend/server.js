@@ -28,6 +28,7 @@ const brokersRoutes      = require('./src/routes/brokers');
 const partnersRoutes     = require('./src/routes/partners');
 const globalSearchRoutes = require('./src/routes/globalSearch');
 const notificationsRoutes= require('./src/routes/notifications');
+const virtualTerminalRoutes = require('./src/routes/virtualTerminal');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -71,6 +72,7 @@ app.use('/api/partners',       partnersRoutes);
 app.use('/api/payroll',        salaryRoutes); // alias to salary
 app.use('/api/global-search',  globalSearchRoutes);
 app.use('/api/notifications',  notificationsRoutes);
+app.use('/api/virtual-terminal', virtualTerminalRoutes);
 
 // 404 for any other /api/*
 app.use('/api', (req, res) => {
