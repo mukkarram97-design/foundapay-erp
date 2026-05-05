@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { authRequired } = require('../middleware/auth');
+const { buildStatement } = require('../services/pdfReceipt');
 
 const router = express.Router();
 router.use(authRequired);
@@ -228,14 +229,22 @@ router.get('/:id/portal-data', async (req, res) => {
   }
 });
 
-// ── GET /api/clients/:id/statement?from=&to= ─────────────────
-router.get('/:id/statement', blockClientUser, async (req, res) => {
+// ── GET /api/clients/:id/statement?from=&to=&format=json|pdf ─
+// Allowed for staff. client_user allowed only when :id matches their own client_id.
+router.get('/:id/statement', async (req, res) => {
   try {
-    const { from, to } = req.query;
+    if (req.user.role === 'client_user' && req.params.id !== req.user.client_id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { from, to, format } = req.query;
     const params = [req.params.id];
     let dateFilter = '';
     if (from) { params.push(from); dateFilter += ` AND date_received >= $${params.length}`; }
     if (to)   { params.push(to);   dateFilter += ` AND date_received <= $${params.length}`; }
+
+    const cl = await pool.query('SELECT * FROM clients WHERE id = $1', [req.params.id]);
+    if (!cl.rows.length) return res.status(404).json({ error: 'Client not found' });
+
     const txs = await pool.query(`
       SELECT * FROM transactions WHERE client_id = $1 ${dateFilter}
       ORDER BY date_received DESC, id DESC
@@ -248,8 +257,23 @@ router.get('/:id/statement', blockClientUser, async (req, res) => {
         COALESCE(SUM(reserve_amount), 0)                                AS reserve_held
       FROM transactions WHERE client_id = $1 ${dateFilter}
     `, params);
-    res.json({ transactions: txs.rows, totals: totals.rows[0] });
+
+    if (format === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition',
+        `attachment; filename="FoundaPay-Statement-${cl.rows[0].name.replace(/\s+/g, '_')}-${from || 'all'}-to-${to || 'all'}.pdf"`);
+      buildStatement({
+        client: cl.rows[0],
+        period: { from: from || '—', to: to || '—' },
+        transactions: txs.rows,
+        totals: totals.rows[0],
+      }, res);
+      return;
+    }
+
+    res.json({ client: cl.rows[0], transactions: txs.rows, totals: totals.rows[0] });
   } catch (err) {
+    console.error('[clients/statement]', err);
     res.status(500).json({ error: err.message });
   }
 });

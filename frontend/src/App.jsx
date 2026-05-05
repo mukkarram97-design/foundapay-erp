@@ -31,8 +31,6 @@ import Expenses from './pages/Expenses';
 import Assets from './pages/Assets';
 
 import Reports from './pages/Reports';
-import Q1Report from './pages/Q1Report';
-import April2026 from './pages/April2026';
 import Salary from './pages/Salary';
 import Payroll from './pages/Payroll';
 import Accounting from './pages/Accounting';
@@ -106,8 +104,6 @@ export default function App() {
         <Route path="/assets"           element={<Guarded><Assets /></Guarded>} />
 
         <Route path="/reports"          element={<Guarded><Reports /></Guarded>} />
-        <Route path="/q1-2026"          element={<Guarded><Q1Report /></Guarded>} />
-        <Route path="/april-2026"       element={<Guarded><April2026 /></Guarded>} />
         <Route path="/salary"           element={<Guarded><Salary /></Guarded>} />
         <Route path="/payroll"          element={<Guarded><Payroll /></Guarded>} />
         <Route path="/accounting"       element={<Guarded><Accounting /></Guarded>} />

@@ -2,11 +2,41 @@ const express = require('express');
 const { pool } = require('../db');
 const { authRequired, requireRole } = require('../middleware/auth');
 const eng = require('../services/transactionEngine');
+const { buildReceipt } = require('../services/pdfReceipt');
 
 const router = express.Router();
 router.use(authRequired);
 
-// Block client_user from this resource — they go through /api/portal/me
+// ── GET /api/transactions/:id/receipt — PDF download ────────
+// Allowed for staff AND for client_user (only their own client's tx).
+router.get('/:id/receipt', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const r = await pool.query(`
+      SELECT t.*, c.name AS client_name, e.legal_name AS entity_name, m.processor_name
+        FROM transactions t
+        LEFT JOIN clients c ON c.id = t.client_id
+        LEFT JOIN entities e ON e.id = t.entity_id
+        LEFT JOIN merchants m ON m.id = t.merchant_id
+       WHERE t.id = $1
+    `, [id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+    const tx = r.rows[0];
+    if (req.user.role === 'client_user' && tx.client_id !== req.user.client_id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="FoundaPay-Receipt-TXN${id}.pdf"`);
+    buildReceipt(tx, { entity_name: tx.entity_name, processor_name: tx.processor_name }, res);
+  } catch (err) {
+    console.error('[tx/receipt]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Block client_user from the rest of this resource
 router.use((req, res, next) => {
   if (req.user.role === 'client_user') return res.status(403).json({ error: 'Forbidden' });
   next();

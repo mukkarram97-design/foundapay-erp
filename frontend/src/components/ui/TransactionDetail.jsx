@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Edit2, Trash2, ExternalLink, Save } from 'lucide-react';
+import { Edit2, Trash2, ExternalLink, Save, FileText } from 'lucide-react';
 import { api } from '../../utils/api';
 import SlideOver from './SlideOver';
 import { Badge, Button, Input, Select, Label, Textarea, money, dateOnly } from './index';
 import { toast } from '../../store/toast';
 import { useAuth } from '../../store/auth';
+import { downloadReceipt } from '../../utils/downloadReceipt';
 
 const STATUS_TONE = { Completed: 'green', Hold: 'amber', Processing: 'blue', 'Charge Back': 'red' };
 
@@ -95,6 +96,11 @@ export default function TransactionDetail({ tx, onClose, onSaved, onDeleted, cli
           {!isCreate && canDelete && (
             <Button variant="danger" onClick={del} disabled={busy} className="mr-auto">
               <Trash2 size={14} /> Delete
+            </Button>
+          )}
+          {!isCreate && (
+            <Button variant="secondary" onClick={() => downloadReceipt(tx.id)}>
+              <FileText size={14} /> Receipt
             </Button>
           )}
           <Button variant="ghost" onClick={onClose}>Cancel</Button>

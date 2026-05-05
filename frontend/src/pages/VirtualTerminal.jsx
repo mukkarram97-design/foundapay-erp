@@ -6,6 +6,7 @@ import {
   Table, Thead, Th, Tr, Td, money,
 } from '../components/ui';
 import TransactionDetail from '../components/ui/TransactionDetail';
+import ProcessPayment from '../components/ProcessPayment';
 import { toast } from '../store/toast';
 
 const METHOD_FIELDS = {
@@ -146,16 +147,45 @@ export default function VirtualTerminal() {
     return r;
   }, [todayEntries]);
 
+  const [tab, setTab] = useState('record');
+
   return (
     <div className="p-6 max-w-[1500px] mx-auto">
       <PageHeader
         title="Virtual Terminal"
-        subtitle="Fast entry — auto commission lookup + live net calculation"
+        subtitle={tab === 'record'
+          ? 'Fast entry — auto commission lookup + live net calculation'
+          : 'Charge a card directly via processor APIs'}
       />
+
+      {/* Tab switcher */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid var(--border)' }}>
+        {[
+          { id: 'record', label: 'Record Transaction' },
+          { id: 'process', label: 'Process Payment' },
+        ].map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            style={{
+              padding: '10px 16px',
+              fontSize: 13, fontWeight: 500,
+              color: tab === t.id ? 'var(--accent)' : 'var(--text-secondary)',
+              background: 'transparent',
+              border: 'none',
+              borderBottom: `2px solid ${tab === t.id ? 'var(--accent)' : 'transparent'}`,
+              marginBottom: -1,
+              cursor: 'pointer',
+            }}
+          >{t.label}</button>
+        ))}
+      </div>
 
       {err && <Alert tone="error" className="mb-4">{err}</Alert>}
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+      {tab === 'process' && <ProcessPayment />}
+
+      {tab === 'record' && <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
         {/* LEFT — entry form */}
         <Card className="p-6 lg:col-span-3">
           <form onSubmit={submit} className="space-y-5">
@@ -372,7 +402,7 @@ export default function VirtualTerminal() {
             </div>
           </Card>
         </div>
-      </div>
+      </div>}
 
       {openTx && (
         <TransactionDetail

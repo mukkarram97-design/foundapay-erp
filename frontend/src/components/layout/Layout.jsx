@@ -42,8 +42,6 @@ const NAV_GROUPS = [
   ]},
   { id: 'reporting', label: 'Reporting', items: [
     { to: '/reports',     label: 'Reports',     icon: BarChart3 },
-    { to: '/april-2026',  label: 'April 2026',  icon: CalendarDays },
-    { to: '/q1-2026',     label: 'Q1 2026',     icon: TrendingUp },
     { to: '/payroll',     label: 'Payroll',     icon: UserCog },
     { to: '/accounting',  label: 'Accounting',  icon: BookOpen },
   ]},

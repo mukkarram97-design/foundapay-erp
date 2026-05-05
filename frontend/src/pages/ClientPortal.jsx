@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus } from 'lucide-react';
+import { Plus, FileText, Download } from 'lucide-react';
 import { useAuth } from '../store/auth';
 import { api } from '../utils/api';
 import {
@@ -9,14 +9,15 @@ import {
 } from '../components/ui';
 import ThemeToggle from '../components/ui/ThemeToggle';
 import { toast } from '../store/toast';
+import { downloadReceipt, downloadStatement } from '../utils/downloadReceipt';
 
 const TABS = [
   { id: 'transactions', label: 'Transactions' },
-  { id: 'payouts',      label: 'Payouts' },
-  { id: 'reserves',     label: 'Reserves' },
-  { id: 'cards',        label: 'Cards' },
   { id: 'payment_links', label: 'Payment Links' },
+  { id: 'reserves',     label: 'Reserves' },
+  { id: 'payouts',      label: 'Payouts' },
   { id: 'chargebacks',  label: 'Chargebacks' },
+  { id: 'statement',    label: 'Statement' },
 ];
 
 export default function ClientPortal() {
@@ -246,6 +247,10 @@ export default function ClientPortal() {
                 </Table>
               </Card>
             )}
+
+            {tab === 'statement' && (
+              <StatementTab clientId={data.client.id} clientName={data.client.name} />
+            )}
           </>
         )}
       </div>
@@ -289,5 +294,86 @@ function RequestLinkModal({ clientId, onClose, onSaved }) {
         <div className="col-span-2"><Label>Description</Label><Input value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} /></div>
       </div>
     </Modal>
+  );
+}
+
+function StatementTab({ clientId, clientName }) {
+  const [from, setFrom] = React.useState('2026-04-01');
+  const [to, setTo] = React.useState('2026-04-30');
+  const [preview, setPreview] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  async function loadPreview() {
+    setBusy(true);
+    try {
+      const r = await api.get(`/api/clients/${clientId}/statement?from=${from}&to=${to}`);
+      setPreview(r);
+    } catch (e) { toast.error(e.message); }
+    finally { setBusy(false); }
+  }
+
+  React.useEffect(() => { loadPreview(); /* eslint-disable-next-line */ }, []);
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-end justify-between flex-wrap gap-3 mb-4">
+        <div>
+          <h3 className="font-semibold" style={{ color: 'var(--text-primary)' }}>Statement preview</h3>
+          <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Choose a period and download a PDF statement.</p>
+        </div>
+        <div className="flex items-end gap-2">
+          <div><Label>From</Label><Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></div>
+          <div><Label>To</Label><Input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></div>
+          <Button variant="secondary" onClick={loadPreview} disabled={busy}>{busy ? 'Loading…' : 'Refresh'}</Button>
+          <Button onClick={() => downloadStatement(clientId, from, to)}>
+            <Download size={14} /> Download PDF
+          </Button>
+        </div>
+      </div>
+
+      {preview && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <Stat label="Gross received" value={money(preview.totals.gross_received)} />
+            <Stat label="Commission" value={money(preview.totals.commission)} tone="success" />
+            <Stat label="Reserve held" value={money(preview.totals.reserve_held)} tone="warning" />
+            <Stat label="Paid out" value={money(preview.totals.paid_out)} />
+          </div>
+          <Table>
+            <Thead><Tr><Th>Date</Th><Th>Type</Th><Th>Method</Th><Th className="text-right">Gross</Th><Th className="text-right">Net</Th><Th>Status</Th><Th></Th></Tr></Thead>
+            <tbody>
+              {preview.transactions.length === 0 && <Tr><Td colSpan="7" style={{ color: 'var(--text-secondary)' }}>No transactions in this period.</Td></Tr>}
+              {preview.transactions.slice(0, 50).map((t) => (
+                <Tr key={t.id}>
+                  <Td>{dateOnly(t.date_received)}</Td>
+                  <Td><Badge tone={t.type === 'Received' ? 'success' : 'warning'}>{t.type}</Badge></Td>
+                  <Td className="text-xs" style={{ color: 'var(--text-secondary)' }}>{t.payment_method || '—'}</Td>
+                  <Td className="text-right font-mono">{money(t.gross_amount)}</Td>
+                  <Td className="text-right font-mono">{money(t.net_amount)}</Td>
+                  <Td><Badge>{t.status}</Badge></Td>
+                  <Td>
+                    <button
+                      onClick={() => downloadReceipt(t.id)}
+                      title="Receipt"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)' }}
+                    ><FileText size={14} /></button>
+                  </Td>
+                </Tr>
+              ))}
+            </tbody>
+          </Table>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function Stat({ label, value, tone = 'default' }) {
+  const c = { default: 'var(--text-primary)', success: 'var(--success)', warning: 'var(--warning)' };
+  return (
+    <div style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
+      <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)' }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 2, color: c[tone] }}>{value}</div>
+    </div>
   );
 }
