@@ -21,6 +21,8 @@ export default function BankAccounts() {
   const [wiseBalances, setWiseBalances] = useState(null);
   const [wiseSyncing, setWiseSyncing] = useState(false);
   const [wiseErr, setWiseErr] = useState(null);
+  // Manual-balance update state — must be declared with the other hooks at top.
+  const [manualBalanceFor, setManualBalanceFor] = useState(null);
 
   async function loadWise() {
     setWiseSyncing(true); setWiseErr(null);
@@ -70,12 +72,17 @@ export default function BankAccounts() {
   }
 
   const totalBalance = rows.reduce((s, r) => s + (parseFloat(r.current_balance) || 0), 0);
+  const wiseUsdEquivalent = Array.isArray(wiseBalances)
+    ? (wiseBalances.find((b) => (b.currency || b.amount?.currency) === 'USD')?.amount?.value || 0)
+    : 0;
+  const grandTotal = totalBalance + (parseFloat(wiseUsdEquivalent) || 0);
+  const accountCount = rows.length + (wiseBalances ? 1 : 0);
 
   return (
     <div className="p-6 max-w-[1500px] mx-auto">
       <PageHeader
         title="Bank Accounts"
-        subtitle={`${rows.length} accounts · Total balance ${money(totalBalance)}`}
+        subtitle={`${accountCount} accounts · Total balance ~${money(grandTotal)} (USD-equivalent, Wise USD only)`}
         actions={
           <div className="flex gap-2">
             <PlaidLinkButton entities={entities} onLinked={load} />
@@ -86,61 +93,53 @@ export default function BankAccounts() {
 
       {err && <Alert tone="error" className="mb-4">{err}</Alert>}
 
-      {/* Wise multi-currency account (synthetic — lives in Wise, not banks table) */}
-      <WiseAccountCard balances={wiseBalances} err={wiseErr} syncing={wiseSyncing} onSync={loadWise} />
+      {loading && rows.length === 0 && !wiseBalances && (
+        <Card className="p-6" style={{ color: 'var(--text-secondary)' }}>Loading bank accounts…</Card>
+      )}
 
-      <Card style={{ overflow: 'visible' }}>
-        <Table>
-          <Thead>
-            <Tr>
-              <Th>Bank / Nickname</Th>
-              <Th>Entity</Th>
-              <Th>Last 4</Th>
-              <Th className="text-right">Current balance</Th>
-              <Th>Source</Th>
-              <Th>Last synced</Th>
-              <Th>Status</Th>
-              <Th style={{ width: 200 }}></Th>
-            </Tr>
-          </Thead>
-          <tbody>
-            {loading && <Tr><Td colSpan="8" style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>Loading…</Td></Tr>}
-            {!loading && rows.length === 0 && (
-              <Tr><Td colSpan="8" style={{ textAlign: 'center', padding: 32 }}>
-                <div style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>No bank accounts yet</div>
-                <PlaidLinkButton entities={entities} onLinked={load} />
-              </Td></Tr>
-            )}
-            {!loading && rows.map((r) => (
-              <Tr key={r.id} clickable onClick={() => setOpenDetail(r)}>
-                <Td>
-                  <div className="font-medium">{r.account_nickname || r.bank_name || '—'}</div>
-                  <div className="text-xs" style={{ color: 'var(--text-tertiary)' }}>{r.bank_name}</div>
-                </Td>
-                <Td>{r.entity_name || '—'}</Td>
-                <Td className="font-mono text-xs">{r.account_last4 ? `••${r.account_last4}` : '—'}</Td>
-                <Td className="text-right font-mono">{money(r.current_balance)}</Td>
-                <Td>{r.plaid_connected ? <Badge tone="success">Plaid</Badge> : <Badge tone="zinc">Manual</Badge>}</Td>
-                <Td className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
-                  {r.plaid_synced_at ? new Date(r.plaid_synced_at).toLocaleString() : '—'}
-                </Td>
-                <Td><Badge tone={r.status === 'active' ? 'success' : 'zinc'}>{r.status}</Badge></Td>
-                <Td onClick={(e) => e.stopPropagation()}>
-                  <div className="flex gap-1">
-                    {r.plaid_connected && (
-                      <Button variant="secondary" size="sm" onClick={() => syncBank(r)} title="Sync transactions">
-                        <RefreshCw size={12} /> Sync
-                      </Button>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={() => setEditing(r)} title="Edit"><Edit2 size={12} /></Button>
-                    <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(r)} title="Delete"><Trash2 size={12} /></Button>
-                  </div>
-                </Td>
-              </Tr>
-            ))}
-          </tbody>
-        </Table>
-      </Card>
+      {!loading && rows.length === 0 && !wiseBalances && (
+        <Card className="p-12" style={{ textAlign: 'center' }}>
+          <div style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>No bank accounts yet</div>
+          <div className="flex gap-2 justify-center">
+            <PlaidLinkButton entities={entities} onLinked={load} />
+            <Button variant="secondary" onClick={() => setOpenCreate(true)}><Plus size={14} /> Add manually</Button>
+          </div>
+        </Card>
+      )}
+
+      {/* Unified card grid — Wise alongside regular banks */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {/* Wise multi-currency card (only renders when Wise is configured) */}
+        {wiseBalances !== null && (
+          <WiseAccountCard
+            balances={wiseBalances}
+            err={wiseErr}
+            syncing={wiseSyncing}
+            onSync={loadWise}
+          />
+        )}
+
+        {!loading && rows.map((r) => (
+          <BankCard
+            key={r.id}
+            row={r}
+            onSync={() => syncBank(r)}
+            onRefreshBalance={() => refreshBalance(r)}
+            onManualBalance={() => setManualBalanceFor(r)}
+            onEdit={() => setEditing(r)}
+            onDelete={() => setConfirmDelete(r)}
+            onView={() => setOpenDetail(r)}
+          />
+        ))}
+      </div>
+
+      {manualBalanceFor && (
+        <ManualBalanceModal
+          row={manualBalanceFor}
+          onClose={() => setManualBalanceFor(null)}
+          onSaved={() => { setManualBalanceFor(null); load(); }}
+        />
+      )}
 
       {(openCreate || editing) && (
         <BankForm
@@ -174,57 +173,185 @@ export default function BankAccounts() {
   );
 }
 
-// ━━━ Wise multi-currency account card ━━━
-function WiseAccountCard({ balances, err, syncing, onSync }) {
-  const total = Array.isArray(balances)
-    ? balances.reduce((s, b) => s + (parseFloat(b.amount?.value ?? b.amount) || 0), 0)
-    : 0;
-  if (!balances && !err) return null; // not configured yet
+// ━━━ Sync method label/icon helpers ━━━
+function SyncMethodBadge({ method, lastSyncedAt }) {
+  const cfg = ({
+    wise:    { icon: '🟢', label: 'Wise API · auto sync',    tone: 'success' },
+    plaid:   { icon: '🟢', label: 'Plaid Connected · auto sync', tone: 'success' },
+    manual:  { icon: '🟡', label: 'Manual · update manually', tone: 'warning' },
+    none:    { icon: '⚪', label: 'Not configured',           tone: 'neutral' },
+  })[method] || { icon: '⚪', label: 'Unknown', tone: 'neutral' };
   return (
-    <Card className="p-4 mb-4">
+    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+      <span style={{ marginRight: 4 }}>{cfg.icon}</span>{cfg.label}
+      {lastSyncedAt && <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 2 }}>
+        Last synced: {new Date(lastSyncedAt).toLocaleString()}
+      </div>}
+    </div>
+  );
+}
+
+// ━━━ Standard bank card (Plaid / Manual / Not connected) ━━━
+function BankCard({ row, onSync, onRefreshBalance, onManualBalance, onEdit, onDelete, onView }) {
+  const method = row.plaid_connected ? 'plaid' : 'manual';
+  const initial = (row.bank_name || row.account_nickname || '?').charAt(0).toUpperCase();
+
+  function handleSync() {
+    if (method === 'plaid') {
+      onRefreshBalance(); // refresh Plaid balance
+      onSync();           // and pull new transactions
+    } else {
+      onManualBalance();
+    }
+  }
+
+  return (
+    <Card className="p-4 cursor-pointer" onClick={onView}>
       <div className="flex items-start gap-3 mb-3">
-        <div style={{ width: 56, height: 56, borderRadius: 10, background: 'linear-gradient(135deg,#9FE870 0%,#00B9FF 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 800, color: '#0E2C0E' }}>
+        <div style={{ width: 48, height: 48, borderRadius: 10, background: 'var(--accent-dim)', color: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 700, flexShrink: 0 }}>
+          {initial}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }} className="truncate">
+            {row.account_nickname || row.bank_name || '—'}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }} className="truncate">
+            {row.bank_name && row.account_nickname && row.bank_name !== row.account_nickname ? row.bank_name : 'Bank account'}
+            {row.account_last4 && ` · ••${row.account_last4}`}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10, marginTop: 6 }}>
+        <div style={{ fontSize: 10, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em' }}>Current balance</div>
+        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--text-primary)', marginTop: 2 }}>
+          {money(row.current_balance)}
+        </div>
+        <div className="mt-2">
+          <SyncMethodBadge method={method} lastSyncedAt={row.plaid_synced_at} />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 mt-3 flex-wrap" onClick={(e) => e.stopPropagation()}>
+        <Button variant="secondary" size="sm" onClick={handleSync}>
+          <RefreshCw size={12} /> {method === 'plaid' ? 'Sync now' : 'Update balance'}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onEdit} title="Edit"><Edit2 size={12} /></Button>
+        <Button variant="ghost" size="sm" onClick={onDelete} title="Delete"><Trash2 size={12} /></Button>
+      </div>
+    </Card>
+  );
+}
+
+// ━━━ Wise multi-currency card — same shape as a bank card ━━━
+function WiseAccountCard({ balances, err, syncing, onSync }) {
+  return (
+    <Card className="p-4">
+      <div className="flex items-start gap-3 mb-3">
+        <div style={{ width: 48, height: 48, borderRadius: 10, background: 'linear-gradient(135deg,#9FE870 0%,#00B9FF 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 800, color: '#0E2C0E', flexShrink: 0 }}>
           W
         </div>
-        <div className="flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>Wise — Nextgenase Inc</div>
-            <Badge tone="info">Multi-currency</Badge>
-            {!err && <Badge tone="success">Live</Badge>}
-            {err && <Badge tone="danger">Error</Badge>}
+        <div className="flex-1 min-w-0">
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }} className="truncate">
+            Nextgenase Inc — Wise
           </div>
-          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
-            Held in Wise · transfers go through <a href="/remittance" style={{ color: 'var(--accent)' }}>Remittance</a>
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+            Multi-currency Account
           </div>
         </div>
-        <Button variant="secondary" size="sm" onClick={onSync} disabled={syncing}>
-          <RefreshCw size={12} /> {syncing ? 'Syncing…' : 'Sync balance'}
-        </Button>
       </div>
 
       {err && <Alert tone="error" className="mb-2">{err}</Alert>}
 
-      {Array.isArray(balances) && balances.length > 0 && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {balances.map((b, i) => {
-            const cur = b.currency || b.amount?.currency || '—';
-            const amt = b.amount?.value ?? b.amount ?? 0;
-            return (
-              <div key={i} style={{ padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg-tertiary)' }}>
-                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{cur}</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: parseFloat(amt) > 0 ? 'var(--text-primary)' : 'var(--text-tertiary)' }}>
-                  {money(amt, cur)}
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10, marginTop: 6 }}>
+        <div style={{ fontSize: 10, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em' }}>Balances</div>
+        {Array.isArray(balances) && balances.length > 0 ? (
+          <div className="grid grid-cols-2 gap-2 mt-2">
+            {balances.map((b, i) => {
+              const cur = b.currency || b.amount?.currency || '—';
+              const amt = b.amount?.value ?? b.amount ?? 0;
+              return (
+                <div key={i} style={{
+                  fontSize: 13, padding: '6px 10px', borderRadius: 6,
+                  background: 'var(--bg-tertiary)',
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{cur}</span>
+                  <span style={{ fontFamily: 'ui-monospace, monospace', fontWeight: parseFloat(amt) > 0 ? 600 : 400, color: parseFloat(amt) > 0 ? 'var(--text-primary)' : 'var(--text-tertiary)' }}>
+                    {money(amt, cur)}
+                  </span>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 6 }}>
+            {err ? '(error loading)' : 'No balances yet.'}
+          </div>
+        )}
+        <div className="mt-2">
+          <SyncMethodBadge method="wise" lastSyncedAt={Array.isArray(balances) ? new Date().toISOString() : null} />
         </div>
-      )}
+      </div>
 
-      {Array.isArray(balances) && balances.length === 0 && (
-        <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>No balances yet on this Wise account.</div>
-      )}
+      <div className="flex items-center gap-2 mt-3 flex-wrap">
+        <Button variant="secondary" size="sm" onClick={onSync} disabled={syncing}>
+          <RefreshCw size={12} /> {syncing ? 'Syncing…' : 'Sync balance'}
+        </Button>
+        <a href="/remittance" style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}>View transfers →</a>
+      </div>
     </Card>
+  );
+}
+
+// ━━━ Manual balance update modal ━━━
+function ManualBalanceModal({ row, onClose, onSaved }) {
+  const [balance, setBalance] = useState(row.current_balance || 0);
+  const [asOf, setAsOf] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  async function save() {
+    setBusy(true); setErr(null);
+    try {
+      const noteSuffix = notes ? ` — ${notes}` : '';
+      const composedNotes = (row.notes ? `${row.notes}\n` : '') +
+        `[${asOf}] Manual balance update: ${money(balance)}${noteSuffix}`;
+      await api.put(`/api/banks/${row.id}`, {
+        current_balance: parseFloat(balance) || 0,
+        notes: composedNotes,
+      });
+      toast.success(`Balance updated for ${row.bank_name || 'bank'}`);
+      onSaved();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`Update balance — ${row.account_nickname || row.bank_name}`}
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save balance'}</Button>
+      </>}>
+      {err && <Alert tone="error" className="mb-3">{err}</Alert>}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="col-span-2"><Label>Current balance ($)</Label>
+          <Input type="number" step="0.01" value={balance}
+            onChange={(e) => setBalance(e.target.value)} autoFocus
+            style={{ height: 44, fontSize: 18, fontWeight: 600 }} />
+        </div>
+        <div><Label>As of date</Label>
+          <Input type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} />
+        </div>
+        <div><Label>Notes (optional)</Label>
+          <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="From bank statement" />
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 12 }}>
+        This appends to the bank's notes for an audit trail. For Plaid-connected banks, use the Sync button instead to pull live data.
+      </div>
+    </Modal>
   );
 }
 

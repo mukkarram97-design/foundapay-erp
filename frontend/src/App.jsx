@@ -92,6 +92,7 @@ export default function App() {
         <Route path="/payment-links"    element={<Guarded><PaymentLinks /></Guarded>} />
         <Route path="/invoices"         element={<Guarded><Invoices /></Guarded>} />
         <Route path="/banks"            element={<Guarded><BankAccounts /></Guarded>} />
+        <Route path="/bank-accounts"    element={<Guarded><BankAccounts /></Guarded>} />
         <Route path="/approvals"        element={<Guarded><Approvals /></Guarded>} />
         <Route path="/remittance"       element={<Guarded><Remittance /></Guarded>} />
 

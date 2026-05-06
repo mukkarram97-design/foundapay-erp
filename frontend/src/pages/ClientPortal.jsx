@@ -12,12 +12,14 @@ import { toast } from '../store/toast';
 import { downloadReceipt, downloadStatement } from '../utils/downloadReceipt';
 
 const BASE_TABS = [
-  { id: 'transactions', label: 'Transactions' },
+  { id: 'home',          label: '🏠 Home' },
+  { id: 'transactions',  label: 'Transactions' },
   { id: 'payment_links', label: 'Payment Links' },
-  { id: 'reserves',     label: 'Reserves' },
-  { id: 'payouts',      label: 'Payouts' },
-  { id: 'chargebacks',  label: 'Chargebacks' },
-  { id: 'statement',    label: 'Statement' },
+  { id: 'reserves',      label: 'Reserves' },
+  { id: 'payouts',       label: 'Payouts' },
+  { id: 'chargebacks',   label: 'Chargebacks' },
+  { id: 'statement',     label: 'Statement' },
+  { id: 'profile',       label: '👤 Profile' },
 ];
 
 export default function ClientPortal() {
@@ -26,8 +28,10 @@ export default function ClientPortal() {
   const [data, setData] = useState(null);
   const [terminalAccess, setTerminalAccess] = useState(null); // null = not loaded, false = no access, object = access record
   const [err, setErr] = useState(null);
-  const [tab, setTab] = useState('transactions');
+  const [tab, setTab] = useState('home');
   const [requestOpen, setRequestOpen] = useState(false);
+  const [perms, setPerms] = useState(null);
+  const [usage, setUsage] = useState(null);
 
   // Show Terminal tab only if the client has access enabled.
   const TABS = terminalAccess
@@ -42,6 +46,12 @@ export default function ClientPortal() {
       const ta = await api.get('/api/portal/terminal-access');
       setTerminalAccess(ta?.access || false);
     } catch { setTerminalAccess(false); }
+    // Pull user-level permissions + usage for Home/Profile display.
+    try {
+      const p = await api.get('/api/permissions/me');
+      setPerms(p?.permissions || null);
+      setUsage(p?.usage || null);
+    } catch { /* ignore — non-critical */ }
   }
   useEffect(() => { load(); }, []);
 
@@ -123,6 +133,15 @@ export default function ClientPortal() {
                 >{t.label}</button>
               ))}
             </div>
+
+            {tab === 'home' && (
+              <ClientHomeTab data={data} perms={perms} usage={usage}
+                onQuickAction={(t) => setTab(t)} />
+            )}
+
+            {tab === 'profile' && (
+              <ClientProfileTab user={user} data={data} perms={perms} terminalAccess={terminalAccess} />
+            )}
 
             {tab === 'transactions' && (
               <Card className="overflow-hidden">
@@ -518,6 +537,266 @@ function TerminalTab({ access, clientName }) {
           </div>
         </Card>
       </div>
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Home tab — welcome, stats, limit usage, quick actions, recent activity
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function ClientHomeTab({ data, perms, usage, onQuickAction }) {
+  if (!data) return null;
+  const txs = data.transactions || [];
+  const links = data.payment_links || [];
+  const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+  const monthlyReceived = txs
+    .filter((t) => t.type === 'Received' && new Date(t.date_received) >= monthStart)
+    .reduce((s, t) => s + (parseFloat(t.gross_amount) || 0), 0);
+  const pendingLinks = links.filter((l) => !['paid', 'cancelled', 'failed', 'expired', 'refunded'].includes(l.status)).length;
+  const balanceDue = parseFloat(data.balance?.current_balance) || 0;
+  const showUsage = perms?.show_usage_to_user && usage;
+
+  // Quick-action visibility from perms (always show what's enabled in user_permissions)
+  const showVT = perms?.can_virtual_terminal !== false; // default true on portal until configured
+  const showLinks = perms?.can_payment_links !== false;
+  const showPayouts = perms?.can_payouts !== false;
+  const showStatement = perms?.can_reports !== false;
+
+  return (
+    <div>
+      {/* Welcome */}
+      <div className="mb-4" style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>
+        Welcome back, {data.client?.name || 'there'}
+      </div>
+      <div className="mb-5" style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+        {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <Card className="p-4">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Received this month</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>{money(monthlyReceived)}</div>
+        </Card>
+        <Card className="p-4">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Pending payment links</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--warning)' }}>{pendingLinks}</div>
+        </Card>
+        <Card className="p-4">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Balance owed to you</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: balanceDue >= 0 ? 'var(--success)' : 'var(--danger)' }}>{money(balanceDue)}</div>
+        </Card>
+        <Card className="p-4">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Reserve held</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>{money(data.balance?.reserve_held)}</div>
+        </Card>
+      </div>
+
+      {/* Limit usage */}
+      {showUsage && (
+        <Card className="p-5 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 style={{ fontSize: 13, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)' }}>
+              My limits
+            </h3>
+            <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+              Period {usage.period?.start} → {usage.period?.end}
+            </span>
+          </div>
+          <UsageBar
+            label="Monthly"
+            used={usage.charged?.this_period}
+            cap={parseFloat(perms?.vt_limit_monthly) || 0}
+          />
+          <UsageBar
+            label="Daily"
+            used={usage.charged?.today}
+            cap={parseFloat(perms?.vt_limit_daily) || 0}
+          />
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 8 }}>
+            Links: <strong>{usage.links?.this_period ?? 0}</strong> this period · <strong>{usage.links?.today ?? 0}</strong> today
+            {parseFloat(perms?.vt_max_links_per_month) > 0 && ` · ${perms.vt_max_links_per_month}/month max`}
+          </div>
+        </Card>
+      )}
+
+      {/* Quick actions */}
+      <Card className="p-5 mb-5">
+        <h3 style={{ fontSize: 13, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)', marginBottom: 12 }}>
+          Quick actions
+        </h3>
+        <div className="flex flex-wrap gap-2">
+          {showLinks && (
+            <Button onClick={() => onQuickAction('terminal')}>💳 New Payment Link</Button>
+          )}
+          {showStatement && (
+            <Button variant="secondary" onClick={() => onQuickAction('statement')}>📄 Download Statement</Button>
+          )}
+          {showPayouts && (
+            <Button variant="secondary" onClick={() => onQuickAction('payouts')}>💰 Request Payout</Button>
+          )}
+          <Button variant="secondary" onClick={() => onQuickAction('transactions')}>📊 View Transactions</Button>
+        </div>
+      </Card>
+
+      {/* Recent activity */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card>
+          <div style={{ padding: '14px 16px', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.06em' }}>
+            Recent transactions
+          </div>
+          <Table>
+            <Thead><Tr><Th>Date</Th><Th>Type</Th><Th className="text-right">Amount</Th><Th>Status</Th></Tr></Thead>
+            <tbody>
+              {txs.slice(0, 5).map((t) => (
+                <Tr key={t.id}>
+                  <Td className="text-xs">{dateOnly(t.date_received)}</Td>
+                  <Td><Badge tone={t.type === 'Received' ? 'success' : 'warning'}>{t.type}</Badge></Td>
+                  <Td className="text-right font-mono">{money(t.gross_amount)}</Td>
+                  <Td><Badge tone={t.status === 'Completed' ? 'success' : 'neutral'}>{t.status}</Badge></Td>
+                </Tr>
+              ))}
+              {txs.length === 0 && <Tr><Td colSpan="4" style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: 16 }}>No transactions yet.</Td></Tr>}
+            </tbody>
+          </Table>
+        </Card>
+
+        <Card>
+          <div style={{ padding: '14px 16px', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.06em' }}>
+            Recent payment links
+          </div>
+          <Table>
+            <Thead><Tr><Th>Created</Th><Th>Customer</Th><Th className="text-right">Amount</Th><Th>Status</Th></Tr></Thead>
+            <tbody>
+              {links.slice(0, 5).map((l) => (
+                <Tr key={l.id}>
+                  <Td className="text-xs">{dateOnly(l.created_at)}</Td>
+                  <Td className="text-xs">{l.customer_name || l.customer_email || '—'}</Td>
+                  <Td className="text-right font-mono">{money(l.amount)}</Td>
+                  <Td><Badge tone={l.status === 'paid' ? 'success' : 'warning'}>{l.status}</Badge></Td>
+                </Tr>
+              ))}
+              {links.length === 0 && <Tr><Td colSpan="4" style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: 16 }}>No payment links yet.</Td></Tr>}
+            </tbody>
+          </Table>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function UsageBar({ label, used, cap }) {
+  const u = parseFloat(used) || 0;
+  const c = parseFloat(cap) || 0;
+  const pct = c > 0 ? Math.min(100, Math.round((u / c) * 100)) : 0;
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+        <span style={{ color: 'var(--text-secondary)' }}>{label} limit</span>
+        <span style={{ fontFamily: 'ui-monospace, monospace', color: 'var(--text-primary)' }}>
+          {money(u)} / {c > 0 ? money(c) : '∞'} {c > 0 && `(${pct}%)`}
+        </span>
+      </div>
+      {c > 0 && (
+        <div style={{ height: 8, background: 'var(--bg-tertiary)', borderRadius: 999, marginTop: 4, overflow: 'hidden' }}>
+          <div style={{
+            width: `${pct}%`, height: '100%',
+            background: pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warning)' : 'var(--accent)',
+            transition: 'width 200ms',
+          }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Profile tab — identity + assigned merchants + limits (read-only)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function ClientProfileTab({ user, data, perms, terminalAccess }) {
+  const cap = (n) => n > 0 ? money(n) : 'Unlimited';
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <Card className="p-5">
+        <h3 style={{ fontSize: 13, fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.06em', marginBottom: 12 }}>
+          Identity
+        </h3>
+        <ProfileRow label="Name" value={user?.name || '—'} />
+        <ProfileRow label="Email" value={user?.email} mono />
+        <ProfileRow label="Role" value={user?.role} />
+        <ProfileRow label="Client" value={data?.client?.name || '—'} />
+        {data?.client?.country && <ProfileRow label="Country" value={data.client.country} />}
+      </Card>
+
+      <Card className="p-5">
+        <h3 style={{ fontSize: 13, fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.06em', marginBottom: 12 }}>
+          Module access
+        </h3>
+        {perms ? (
+          <div style={{ fontSize: 13 }}>
+            <ProfileToggle label="Virtual Terminal" on={perms.can_virtual_terminal} />
+            <ProfileToggle label="Payment Links" on={perms.can_payment_links} />
+            <ProfileToggle label="Invoices" on={perms.can_invoices} />
+            <ProfileToggle label="Transactions" on={perms.can_master_ledger} />
+            <ProfileToggle label="Reports" on={perms.can_reports} />
+            <ProfileToggle label="Payouts" on={perms.can_payouts} />
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+            No custom permissions configured. Defaults apply.
+          </div>
+        )}
+      </Card>
+
+      {perms && (
+        <Card className="p-5 lg:col-span-2">
+          <h3 style={{ fontSize: 13, fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.06em', marginBottom: 12 }}>
+            My limits
+          </h3>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <ProfileStat label="Per transaction" value={cap(parseFloat(perms.vt_limit_per_transaction))} />
+            <ProfileStat label="Daily total" value={cap(parseFloat(perms.vt_limit_daily))} />
+            <ProfileStat label="Monthly total" value={cap(parseFloat(perms.vt_limit_monthly))} />
+            <ProfileStat label="Max link amount" value={cap(parseFloat(perms.vt_link_max_amount))} />
+            <ProfileStat label="Links / day"
+              value={parseFloat(perms.vt_max_links_per_day) > 0 ? perms.vt_max_links_per_day : 'Unlimited'} />
+            <ProfileStat label="Links / month"
+              value={parseFloat(perms.vt_max_links_per_month) > 0 ? perms.vt_max_links_per_month : 'Unlimited'} />
+            <ProfileStat label="Link expires after" value={`${perms.vt_link_auto_expire_hours || 24} h`} />
+            <ProfileStat label="When limit hit" value={({ block: 'Block', warn: 'Warn', require_approval: 'Approval' })[perms.limit_action] || 'Block'} />
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 12 }}>
+            These limits are read-only. Contact your account manager to change them.
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function ProfileRow({ label, value, mono }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 13 }}>
+      <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
+      <span style={{ fontFamily: mono ? 'ui-monospace, monospace' : 'inherit', color: 'var(--text-primary)' }}>{value}</span>
+    </div>
+  );
+}
+function ProfileToggle({ label, on }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+      <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
+      <span style={{ color: on ? 'var(--success)' : 'var(--text-tertiary)' }}>
+        {on ? '✓ Enabled' : '— Disabled'}
+      </span>
+    </div>
+  );
+}
+function ProfileStat({ label, value }) {
+  return (
+    <div style={{ background: 'var(--bg-tertiary)', borderRadius: 8, padding: 10 }}>
+      <div style={{ fontSize: 10, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em' }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginTop: 4 }}>{value}</div>
     </div>
   );
 }
