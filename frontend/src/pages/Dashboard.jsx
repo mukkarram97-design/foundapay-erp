@@ -241,6 +241,9 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Client balances */}
+      <ClientBalancesSection />
+
       {/* Alerts */}
       {data && (data.card_alerts.length + data.renewals.length > 0) && (
         <div className="mt-4 space-y-2">
@@ -280,6 +283,90 @@ export default function Dashboard() {
         />
       )}
     </div>
+  );
+}
+
+function ClientBalancesSection() {
+  const navigate = useNavigate();
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    api.get('/api/dashboard/client-balances').then(setData).catch((e) => setErr(e.message));
+  }, []);
+  if (err) return <Alert tone="error" className="mt-4">{err}</Alert>;
+  if (!data) return null;
+  const rows = data.rows || [];
+  if (rows.length === 0) return null;
+  const t = data.totals || {};
+  return (
+    <Card className="p-5 mt-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 style={{ fontSize: 13, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)' }}>
+            Client balances
+          </h3>
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+            Net to client minus payouts and reserves held — green = we owe, red = they owe.
+          </div>
+        </div>
+        <button onClick={() => setOpen((o) => !o)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 12 }}>
+          {open ? '▾ Hide' : '▸ Show'}
+        </button>
+      </div>
+      {open && (
+        <Table>
+          <Thead>
+            <Tr>
+              <Th>Client</Th>
+              <Th className="text-right">Total received</Th>
+              <Th className="text-right">FP fee</Th>
+              <Th className="text-right">Net earned</Th>
+              <Th className="text-right">Paid out</Th>
+              <Th className="text-right">Reserve held</Th>
+              <Th className="text-right">Balance due</Th>
+              <Th></Th>
+            </Tr>
+          </Thead>
+          <tbody>
+            {rows.map((r) => (
+              <Tr key={r.id}>
+                <Td>{r.name}</Td>
+                <Td className="text-right font-mono">{money(r.total_received)}</Td>
+                <Td className="text-right font-mono" style={{ color: 'var(--text-secondary)' }}>{money(r.fp_fee)}</Td>
+                <Td className="text-right font-mono">{money(r.net_earned)}</Td>
+                <Td className="text-right font-mono" style={{ color: 'var(--text-secondary)' }}>{money(r.paid_out)}</Td>
+                <Td className="text-right font-mono" style={{ color: 'var(--text-secondary)' }}>{money(r.reserve_held)}</Td>
+                <Td className="text-right font-mono" style={{
+                  color: r.balance_due > 0 ? 'var(--success)' : (r.balance_due < 0 ? 'var(--danger)' : 'var(--text-primary)'),
+                  fontWeight: 600,
+                }}>{money(r.balance_due)}</Td>
+                <Td>
+                  <button onClick={() => navigate(`/reports?tab=cs&client=${r.id}`)}
+                    style={{ background: 'none', border: 'none', color: 'var(--accent)', fontSize: 11, cursor: 'pointer' }}>
+                    View statement →
+                  </button>
+                </Td>
+              </Tr>
+            ))}
+            <Tr>
+              <Td style={{ fontWeight: 600 }}>Totals</Td>
+              <Td className="text-right font-mono" style={{ fontWeight: 600 }}>{money(t.total_received)}</Td>
+              <Td className="text-right font-mono" style={{ fontWeight: 600 }}>{money(t.fp_fee)}</Td>
+              <Td className="text-right font-mono" style={{ fontWeight: 600 }}>{money(t.net_earned)}</Td>
+              <Td className="text-right font-mono" style={{ fontWeight: 600 }}>{money(t.paid_out)}</Td>
+              <Td className="text-right font-mono" style={{ fontWeight: 600 }}>{money(t.reserve_held)}</Td>
+              <Td className="text-right font-mono" style={{
+                fontWeight: 700,
+                color: t.balance_due > 0 ? 'var(--success)' : (t.balance_due < 0 ? 'var(--danger)' : 'var(--text-primary)'),
+              }}>{money(t.balance_due)}</Td>
+              <Td></Td>
+            </Tr>
+          </tbody>
+        </Table>
+      )}
+    </Card>
   );
 }
 

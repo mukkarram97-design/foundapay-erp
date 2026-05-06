@@ -238,6 +238,7 @@ router.post('/generate-link', async (req, res) => {
       expiryMinutes: parseInt(b.expiry_minutes || 1440, 10), // 24h default
       method: b.method || 'self_hosted', // 'self_hosted' renders our Accept.js page; 'auto' / 'hosted_redirect' use Authorize.net hosted page
       returnUrl: b.return_url || 'https://portal.foundapay.com',
+      invoiceId: b.invoice_id || null, // when set, GET /pay/:token renders the detailed invoice page
     });
 
     if (!result.success) return res.status(502).json({ success: false, error: result.message });

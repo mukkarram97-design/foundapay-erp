@@ -155,4 +155,50 @@ router.get('/summary', async (req, res) => {
   }
 });
 
+// ── GET /api/dashboard/client-balances ──────────────────────
+// Per-client roll-up: Received, FP fee, Net, Paid out, Reserve held, Balance due.
+// Balance due = Net earned - Paid out - Reserve held.
+//   positive → we owe them; negative → they owe us.
+router.get('/client-balances', async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        c.id, c.name, c.country, c.status, c.balance_owed,
+        COALESCE(SUM(t.gross_amount) FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0)::float AS total_received,
+        COALESCE(SUM(t.fee_amount)   FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0)::float AS fp_fee,
+        COALESCE(SUM(t.net_amount)   FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0)::float AS net_earned,
+        COALESCE((SELECT SUM(amount) FROM payouts WHERE client_id = c.id AND status = 'sent'), 0)::float    AS paid_out,
+        COALESCE((SELECT SUM(amount - released_amount) FROM reserves
+                   WHERE client_id = c.id AND status IN ('held','partially_released')), 0)::float          AS reserve_held,
+        COUNT(t.id) FILTER (WHERE t.is_deleted = false)::int                                                AS tx_count
+      FROM clients c
+      LEFT JOIN transactions t ON t.client_id = c.id
+      WHERE c.is_deleted = false
+      GROUP BY c.id
+      ORDER BY (
+        COALESCE(SUM(t.net_amount)   FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0)
+        - COALESCE((SELECT SUM(amount) FROM payouts WHERE client_id = c.id AND status = 'sent'), 0)
+        - COALESCE((SELECT SUM(amount - released_amount) FROM reserves
+                     WHERE client_id = c.id AND status IN ('held','partially_released')), 0)
+      ) DESC
+    `);
+    const rows = r.rows.map((x) => ({
+      ...x,
+      balance_due: +(parseFloat(x.net_earned) - parseFloat(x.paid_out) - parseFloat(x.reserve_held)).toFixed(2),
+    }));
+    const totals = rows.reduce((a, x) => ({
+      total_received: a.total_received + parseFloat(x.total_received),
+      fp_fee:         a.fp_fee + parseFloat(x.fp_fee),
+      net_earned:     a.net_earned + parseFloat(x.net_earned),
+      paid_out:       a.paid_out + parseFloat(x.paid_out),
+      reserve_held:   a.reserve_held + parseFloat(x.reserve_held),
+      balance_due:    a.balance_due + parseFloat(x.balance_due),
+    }), { total_received: 0, fp_fee: 0, net_earned: 0, paid_out: 0, reserve_held: 0, balance_due: 0 });
+    res.json({ rows, totals });
+  } catch (err) {
+    console.error('[dashboard client-balances]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

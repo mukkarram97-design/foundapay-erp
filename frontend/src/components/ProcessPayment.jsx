@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   CreditCard, Link2, Lock, AlertTriangle, CheckCircle2, XCircle, FileText,
-  RotateCcw, Copy, Check, Activity,
+  RotateCcw, Copy, Check, Activity, FileSpreadsheet, Plus, X, Download, Send, Eye,
 } from 'lucide-react';
 import { api } from '../utils/api';
-import { Card, Button, Input, Select, Label, Badge, money } from './ui';
+import { Card, Button, Input, Select, Textarea, Label, Badge, money } from './ui';
 import { toast } from '../store/toast';
 import { useAuth } from '../store/auth';
 import { downloadReceipt } from '../utils/downloadReceipt';
@@ -49,7 +49,17 @@ export default function ProcessPayment() {
   // locked, read-only field. client_user never sees it at all.
   const feePctReadOnly = !isSuperAdmin;
 
-  const [chargeType, setChargeType] = useState('direct'); // 'direct' | 'link'
+  const [chargeType, setChargeType] = useState(() => {
+    // Honor a one-shot navigation hint from PaymentLinks "+ New" dropdown.
+    try {
+      const hint = sessionStorage.getItem('vt_default_charge_type');
+      if (hint) {
+        sessionStorage.removeItem('vt_default_charge_type');
+        if (['direct', 'link', 'invoice'].includes(hint)) return hint;
+      }
+    } catch { /* sessionStorage may be unavailable */ }
+    return 'direct';
+  }); // 'direct' | 'link' | 'invoice'
 
   const [clients, setClients] = useState([]);
   const [entities, setEntities] = useState([]);
@@ -162,6 +172,158 @@ export default function ProcessPayment() {
     return { gross, commission, reserve, reserveLabel, netToClient, fpTotal, feePctDecimal, feePctDisplay };
   }, [form.amount, form.foundapay_fee_pct_display, selectedClient]);
 
+  // ━━━ Invoice tab state (declared after `form` to avoid TDZ — invCalc reads form.foundapay_fee_pct_display) ━━━
+  const [invForm, setInvForm] = useState(() => ({
+    invoiceNumber: '',
+    issueDate: new Date().toISOString().slice(0, 10),
+    dueDate: '',
+    paymentTerms: 'due_on_receipt',
+    customer_name: '', customer_email: '', customer_phone: '', customer_address: '',
+    line_items: [{ description: '', quantity: 1, unit_price: 0 }],
+    discount_amount: 0,
+    // tax_pct holds the *display* percentage (e.g. 8.25). Sent to backend as decimal (8.25 / 100).
+    tax_pct: 0,
+    notes: '', internal_notes: '',
+    generatePaymentLink: true, sendEmail: true,
+  }));
+  const [invResult, setInvResult] = useState(null);
+  const [invSaving, setInvSaving] = useState(false);
+  const [invCopied, setInvCopied] = useState(false);
+
+  function setInvLine(i, k, v) {
+    setInvForm((f) => ({ ...f, line_items: f.line_items.map((li, idx) => idx === i ? { ...li, [k]: v } : li) }));
+  }
+  function addInvLine() {
+    setInvForm((f) => ({ ...f, line_items: [...f.line_items, { description: '', quantity: 1, unit_price: 0 }] }));
+  }
+  function removeInvLine(i) {
+    setInvForm((f) => ({ ...f, line_items: f.line_items.filter((_, idx) => idx !== i) }));
+  }
+
+  useEffect(() => {
+    if (chargeType !== 'invoice' || !invForm.issueDate) return;
+    const map = { due_on_receipt: 0, net_15: 15, net_30: 30, net_60: 60 };
+    const days = map[invForm.paymentTerms];
+    if (days == null) return;
+    const d = new Date(invForm.issueDate);
+    d.setDate(d.getDate() + days);
+    setInvForm((f) => ({ ...f, dueDate: d.toISOString().slice(0, 10) }));
+  // eslint-disable-next-line
+  }, [invForm.paymentTerms, invForm.issueDate, chargeType]);
+
+  const invCalc = useMemo(() => {
+    const subtotal = invForm.line_items.reduce((s, li) => s + (parseFloat(li.quantity) || 0) * (parseFloat(li.unit_price) || 0), 0);
+    const discount = parseFloat(invForm.discount_amount) || 0;
+    const taxBase = Math.max(0, subtotal - discount);
+    const taxRateDecimal = (parseFloat(invForm.tax_pct) || 0) / 100;
+    const taxAmount = taxBase * taxRateDecimal;
+    const total = taxBase + taxAmount;
+    const cardPctDecimal = (parseFloat(form.foundapay_fee_pct_display) || 0) / 100;
+    const commission = total * cardPctDecimal;
+    const net = total - commission;
+    return { subtotal, discount, taxAmount, total, commission, net, cardPctDecimal, taxRateDecimal };
+  }, [invForm.line_items, invForm.discount_amount, invForm.tax_pct, form.foundapay_fee_pct_display]);
+
+  async function generateInvoice() {
+    setInvSaving(true);
+    setInvResult(null);
+    try {
+      const createBody = {
+        client_id: form.client_id || null,
+        entity_id: form.entity_id || null,
+        customer_name: invForm.customer_name || null,
+        customer_email: invForm.customer_email || null,
+        customer_phone: invForm.customer_phone || null,
+        customer_address: invForm.customer_address || null,
+        issue_date: invForm.issueDate || null,
+        due_date: invForm.dueDate || null,
+        line_items: invForm.line_items.filter((li) => li.description || li.unit_price),
+        tax_rate: (parseFloat(invForm.tax_pct) || 0) / 100, // backend stores decimal
+        discount_amount: parseFloat(invForm.discount_amount) || 0,
+        currency: 'USD',
+        notes: invForm.notes || null,
+      };
+      if (invForm.invoiceNumber) createBody.invoice_number = invForm.invoiceNumber;
+      const created = await api.post('/api/invoices', createBody);
+
+      let paymentLink = null;
+      if (invForm.generatePaymentLink) {
+        const linkBody = {
+          amount: parseFloat(created.total_amount),
+          description: `Invoice ${created.invoice_number}`,
+          invoiceNumber: created.invoice_number,
+          invoice_id: created.id, // bridge: GET /pay/:token shows detailed invoice page
+          customer_email: invForm.customer_email || undefined,
+          client_id: form.client_id || null,
+          entity_id: form.entity_id || null,
+          brand_name: form.brand_name || authConfig?.entity || 'FoundaPay',
+          logo_type: form.logo_type || 'entity',
+          expiry_minutes: 60 * 24 * 30,
+          method: 'self_hosted',
+        };
+        const linkRes = await api.post('/api/vt/generate-link', linkBody);
+        if (linkRes?.success && linkRes.hostedUrl) {
+          paymentLink = linkRes;
+          await api.put(`/api/invoices/${created.id}`, { payment_link_url: linkRes.hostedUrl });
+        }
+      }
+
+      let sendStatus = null;
+      if (invForm.sendEmail && invForm.customer_email) {
+        try {
+          const r = await api.post(`/api/invoices/${created.id}/send`, {});
+          sendStatus = { ok: true, mode: r.mode, sent_to: r.sent_to };
+        } catch (e) {
+          sendStatus = { ok: false, error: e.message };
+        }
+      }
+
+      setInvResult({ success: true, invoice: created, paymentLink, sendStatus });
+      toast.success(`Invoice ${created.invoice_number} ${sendStatus?.ok ? 'sent' : 'created'}`);
+    } catch (e) {
+      setInvResult({ success: false, error: e.message });
+      toast.error(e.message);
+    } finally {
+      setInvSaving(false);
+    }
+  }
+
+  function copyInvLink() {
+    if (!invResult?.paymentLink?.hostedUrl) return;
+    navigator.clipboard.writeText(invResult.paymentLink.hostedUrl);
+    setInvCopied(true);
+    setTimeout(() => setInvCopied(false), 1500);
+  }
+
+  function downloadInvPdf() {
+    if (!invResult?.invoice?.id) return;
+    const token = localStorage.getItem('foundapay_token');
+    fetch(`/api/invoices/${invResult.invoice.id}/pdf`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.blob())
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `${invResult.invoice.invoice_number}.pdf`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
+  }
+
+  function resetInvoiceForm() {
+    setInvResult(null);
+    setInvForm({
+      invoiceNumber: '',
+      issueDate: new Date().toISOString().slice(0, 10),
+      dueDate: '',
+      paymentTerms: 'due_on_receipt',
+      customer_name: '', customer_email: '', customer_phone: '', customer_address: '',
+      line_items: [{ description: '', quantity: 1, unit_price: 0 }],
+      discount_amount: 0, tax_pct: 0,
+      notes: '', internal_notes: '',
+      generatePaymentLink: true, sendEmail: true,
+    });
+  }
+
   // Countdown for hosted-link expiration
   useEffect(() => {
     if (!result?.expiresAt) return;
@@ -268,7 +430,7 @@ export default function ProcessPayment() {
         {/* Charge type selector */}
         <Card className="p-5">
           <SectionTitle>Charge type</SectionTitle>
-          <div className="grid grid-cols-2 gap-3 mt-2">
+          <div className="grid grid-cols-3 gap-3 mt-2">
             <ChargeCard
               icon={CreditCard}
               title="Direct Charge"
@@ -282,6 +444,13 @@ export default function ProcessPayment() {
               sub="Send URL or QR to customer"
               active={chargeType === 'link'}
               onClick={() => { setChargeType('link'); setResult(null); }}
+            />
+            <ChargeCard
+              icon={FileSpreadsheet}
+              title="Generate Invoice"
+              sub="Itemized invoice + pay link"
+              active={chargeType === 'invoice'}
+              onClick={() => { setChargeType('invoice'); setResult(null); setInvResult(null); }}
             />
           </div>
 
@@ -319,7 +488,8 @@ export default function ProcessPayment() {
           </div>
         </Card>
 
-        {/* Amount + invoice + description */}
+        {/* Amount + invoice + description (Direct Charge / Payment Link only) */}
+        {chargeType !== 'invoice' && (
         <Card className="p-5">
           <SectionTitle>Amount &amp; details</SectionTitle>
           <div className="mt-2">
@@ -342,8 +512,9 @@ export default function ProcessPayment() {
             </div>
           </div>
         </Card>
+        )}
 
-        {/* Client + entity + fee */}
+        {/* Client + entity + fee — shared by Direct Charge / Payment Link / Invoice */}
         <Card className="p-5">
           <SectionTitle>Client &amp; entity</SectionTitle>
           <div className="grid grid-cols-2 gap-3 mt-2">
@@ -363,7 +534,7 @@ export default function ProcessPayment() {
             </div>
           </div>
 
-          {!isClientUser && (
+          {!isClientUser && chargeType !== 'invoice' && (
             <div className="mt-3">
               <Label>FoundaPay fee %</Label>
               <div style={{ position: 'relative' }}>
@@ -402,7 +573,8 @@ export default function ProcessPayment() {
           )}
         </Card>
 
-        {/* Branding */}
+        {/* Branding — Direct Charge / Payment Link only (invoice gets logo from client/entity) */}
+        {chargeType !== 'invoice' && (
         <Card className="p-5">
           <SectionTitle>Branding (shown on payment page)</SectionTitle>
           <div className="grid grid-cols-2 gap-3 mt-2">
@@ -420,6 +592,7 @@ export default function ProcessPayment() {
             </div>
           </div>
         </Card>
+        )}
 
         {/* Direct charge: card + customer */}
         {chargeType === 'direct' && (
@@ -521,6 +694,187 @@ export default function ProcessPayment() {
           </>
         )}
 
+        {/* INVOICE TAB — customer + invoice meta + line items + payment options */}
+        {chargeType === 'invoice' && !invResult?.success && (
+          <>
+            <Card className="p-5">
+              <SectionTitle>Customer Details</SectionTitle>
+              <div className="grid grid-cols-2 gap-3 mt-2">
+                <div><Label>Customer name *</Label>
+                  <Input value={invForm.customer_name} onChange={(e) => setInvForm((f) => ({ ...f, customer_name: e.target.value }))} />
+                </div>
+                <div><Label>Customer email *</Label>
+                  <Input type="email" value={invForm.customer_email} onChange={(e) => setInvForm((f) => ({ ...f, customer_email: e.target.value }))} />
+                </div>
+                <div><Label>Phone</Label>
+                  <Input value={invForm.customer_phone} onChange={(e) => setInvForm((f) => ({ ...f, customer_phone: e.target.value }))} />
+                </div>
+                <div><Label>Billing address</Label>
+                  <Input value={invForm.customer_address} onChange={(e) => setInvForm((f) => ({ ...f, customer_address: e.target.value }))} />
+                </div>
+              </div>
+            </Card>
+
+            <Card className="p-5">
+              <SectionTitle>Invoice Details</SectionTitle>
+              <div className="grid grid-cols-2 gap-3 mt-2">
+                <div><Label>Invoice # <span style={{ fontSize: 10, color: 'var(--text-tertiary)', textTransform: 'none', letterSpacing: 0 }}>(auto if blank)</span></Label>
+                  <Input placeholder="INV-2026-0001" value={invForm.invoiceNumber}
+                    onChange={(e) => setInvForm((f) => ({ ...f, invoiceNumber: e.target.value }))} />
+                </div>
+                <div><Label>Issue date</Label>
+                  <Input type="date" value={invForm.issueDate}
+                    onChange={(e) => setInvForm((f) => ({ ...f, issueDate: e.target.value }))} />
+                </div>
+                <div><Label>Due date</Label>
+                  <Input type="date" value={invForm.dueDate}
+                    onChange={(e) => setInvForm((f) => ({ ...f, dueDate: e.target.value }))} />
+                </div>
+                <div><Label>Payment terms</Label>
+                  <Select value={invForm.paymentTerms}
+                    onChange={(e) => setInvForm((f) => ({ ...f, paymentTerms: e.target.value }))}>
+                    <option value="due_on_receipt">Due on Receipt</option>
+                    <option value="net_15">Net 15</option>
+                    <option value="net_30">Net 30</option>
+                    <option value="net_60">Net 60</option>
+                  </Select>
+                </div>
+              </div>
+            </Card>
+
+            <Card className="p-5">
+              <div className="flex items-center justify-between mb-2">
+                <SectionTitle>Line Items</SectionTitle>
+                <Button variant="ghost" size="sm" onClick={addInvLine}><Plus size={12} /> Add line</Button>
+              </div>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                <table style={{ width: '100%', fontSize: 13 }}>
+                  <thead style={{ background: 'var(--bg-tertiary)' }}>
+                    <tr style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)' }}>
+                      <th style={{ padding: '8px 10px', textAlign: 'left' }}>#</th>
+                      <th style={{ padding: '8px 10px', textAlign: 'left' }}>Description</th>
+                      <th style={{ padding: '8px 10px', textAlign: 'right', width: 70 }}>Qty</th>
+                      <th style={{ padding: '8px 10px', textAlign: 'right', width: 100 }}>Unit price</th>
+                      <th style={{ padding: '8px 10px', textAlign: 'right', width: 100 }}>Amount</th>
+                      <th style={{ width: 32 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {invForm.line_items.map((li, i) => {
+                      const lt = (parseFloat(li.quantity) || 0) * (parseFloat(li.unit_price) || 0);
+                      return (
+                        <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                          <td style={{ padding: 6, color: 'var(--text-tertiary)', textAlign: 'center' }}>{i + 1}</td>
+                          <td style={{ padding: 6 }}>
+                            <Input value={li.description || ''} onChange={(e) => setInvLine(i, 'description', e.target.value)} />
+                          </td>
+                          <td style={{ padding: 6 }}>
+                            <Input type="number" step="0.01" value={li.quantity ?? ''} onChange={(e) => setInvLine(i, 'quantity', e.target.value)} style={{ textAlign: 'right' }} />
+                          </td>
+                          <td style={{ padding: 6 }}>
+                            <Input type="number" step="0.01" value={li.unit_price ?? ''} onChange={(e) => setInvLine(i, 'unit_price', e.target.value)} style={{ textAlign: 'right' }} />
+                          </td>
+                          <td style={{ padding: 6, textAlign: 'right', fontFamily: 'ui-monospace, monospace' }}>{money(lt)}</td>
+                          <td style={{ padding: 6, textAlign: 'center' }}>
+                            <button onClick={() => removeInvLine(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}>
+                              <X size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="grid grid-cols-2 gap-3 mt-3">
+                <div><Label>Discount</Label>
+                  <Input type="number" step="0.01" value={invForm.discount_amount ?? 0}
+                    onChange={(e) => setInvForm((f) => ({ ...f, discount_amount: e.target.value }))} />
+                </div>
+                <div><Label>Tax % <span style={{ fontSize: 10, color: 'var(--text-tertiary)', textTransform: 'none', letterSpacing: 0 }}>(e.g. 8.25 for 8.25%)</span></Label>
+                  <Input type="number" step="0.01" placeholder="8.25" value={invForm.tax_pct ?? 0}
+                    onChange={(e) => setInvForm((f) => ({ ...f, tax_pct: e.target.value }))} />
+                </div>
+              </div>
+            </Card>
+
+            <Card className="p-5">
+              <SectionTitle>Payment Options</SectionTitle>
+              <div className="space-y-2 mt-3">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={invForm.generatePaymentLink}
+                    onChange={(e) => setInvForm((f) => ({ ...f, generatePaymentLink: e.target.checked }))} />
+                  <div>
+                    <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>Generate Payment Link</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Customer can pay online with a card</div>
+                  </div>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: invForm.customer_email ? 'pointer' : 'not-allowed', opacity: invForm.customer_email ? 1 : 0.5 }}>
+                  <input type="checkbox" checked={invForm.sendEmail && !!invForm.customer_email}
+                    disabled={!invForm.customer_email}
+                    onChange={(e) => setInvForm((f) => ({ ...f, sendEmail: e.target.checked }))} />
+                  <div>
+                    <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>Send via email{!invForm.customer_email && <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}> — needs customer email</span>}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Email PDF + payment link</div>
+                  </div>
+                </label>
+              </div>
+            </Card>
+
+            <Card className="p-5">
+              <SectionTitle>Notes</SectionTitle>
+              <div className="grid grid-cols-1 gap-3 mt-2">
+                <div><Label>Notes to customer (shown on invoice)</Label>
+                  <Textarea rows="2" value={invForm.notes}
+                    onChange={(e) => setInvForm((f) => ({ ...f, notes: e.target.value }))} />
+                </div>
+              </div>
+            </Card>
+          </>
+        )}
+
+        {/* INVOICE — success state */}
+        {chargeType === 'invoice' && invResult?.success && (
+          <Card className="p-6" style={{ borderLeft: '3px solid var(--success)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+              <CheckCircle2 size={24} color="var(--success)" />
+              <h3 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-primary)' }}>Invoice {invResult.sendStatus?.ok ? 'Sent' : 'Created'} Successfully</h3>
+            </div>
+            <Row label="Invoice" value={invResult.invoice.invoice_number} mono />
+            {invResult.sendStatus?.ok && <Row label="Sent to" value={invResult.sendStatus.sent_to} />}
+            <Row label="Amount" value={money(invResult.invoice.total_amount)} />
+            {invResult.invoice.due_date && <Row label="Due" value={invResult.invoice.due_date} />}
+            {invResult.paymentLink?.hostedUrl && (
+              <>
+                <div style={{ marginTop: 14, fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em' }}>
+                  Payment link
+                </div>
+                <div style={{
+                  marginTop: 6, padding: '8px 10px', borderRadius: 8,
+                  background: 'var(--bg-tertiary)', fontFamily: 'monospace', fontSize: 11,
+                  color: 'var(--text-secondary)', wordBreak: 'break-all',
+                }}>{invResult.paymentLink.hostedUrl}</div>
+              </>
+            )}
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              {invResult.paymentLink?.hostedUrl && (
+                <Button variant="secondary" onClick={copyInvLink}>
+                  {invCopied ? <Check size={14} /> : <Copy size={14} />}
+                  {invCopied ? 'Copied' : 'Copy link'}
+                </Button>
+              )}
+              <Button variant="secondary" onClick={downloadInvPdf}><Download size={14} /> Download PDF</Button>
+              <Button variant="secondary" onClick={resetInvoiceForm}>Send Another</Button>
+              <Button variant="secondary" onClick={() => window.open('/invoices', '_self')}><Eye size={14} /> View Invoice</Button>
+            </div>
+            {invResult.sendStatus && !invResult.sendStatus.ok && (
+              <div className="mt-3" style={{ fontSize: 12, color: 'var(--warning)' }}>
+                Email send failed: {invResult.sendStatus.error}
+              </div>
+            )}
+          </Card>
+        )}
+
         {/* Payment link options */}
         {chargeType === 'link' && (
           <Card className="p-5">
@@ -556,19 +910,60 @@ export default function ProcessPayment() {
         )}
 
         {/* Submit */}
-        <Button onClick={process} disabled={!requiredOk || busy} size="lg" className="w-full">
-          <Lock size={14} />
-          {busy
-            ? `Processing via Authorize.net…`
-            : chargeType === 'direct'
-              ? `Charge ${money(calc.gross)} via Authorize.net →`
-              : `Generate payment link → ${money(calc.gross)}`}
-        </Button>
+        {chargeType === 'invoice' ? (
+          !invResult?.success && (
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant="secondary" disabled={invSaving} onClick={async () => {
+                // Save as draft = create invoice without payment link or email
+                const prev = { gp: invForm.generatePaymentLink, se: invForm.sendEmail };
+                setInvForm((f) => ({ ...f, generatePaymentLink: false, sendEmail: false }));
+                await new Promise((r) => setTimeout(r, 30));
+                await generateInvoice();
+                setInvForm((f) => ({ ...f, generatePaymentLink: prev.gp, sendEmail: prev.se }));
+              }}>
+                {invSaving ? 'Saving…' : 'Save as Draft'}
+              </Button>
+              <Button onClick={generateInvoice} disabled={invSaving || !invForm.customer_name || invCalc.total <= 0} size="lg">
+                <Send size={14} />
+                {invSaving ? 'Generating…' : `Generate & Send — ${money(invCalc.total)}`}
+              </Button>
+            </div>
+          )
+        ) : (
+          <Button onClick={process} disabled={!requiredOk || busy} size="lg" className="w-full">
+            <Lock size={14} />
+            {busy
+              ? `Processing via Authorize.net…`
+              : chargeType === 'direct'
+                ? `Charge ${money(calc.gross)} via Authorize.net →`
+                : `Generate payment link → ${money(calc.gross)}`}
+          </Button>
+        )}
       </div>
 
       {/* RIGHT — calc + result */}
       <div className="lg:col-span-2 space-y-4">
-        {/* Client Settlement */}
+        {chargeType === 'invoice' ? (
+          <>
+            <Card className="p-5">
+              <SectionTitle>📄 Invoice Preview</SectionTitle>
+              <div className="mt-3" style={{ fontSize: 13 }}>
+                <div style={{ color: 'var(--text-tertiary)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Invoice #</div>
+                <div style={{ fontFamily: 'ui-monospace, monospace' }}>{invForm.invoiceNumber || 'auto-generated'}</div>
+                <div style={{ color: 'var(--text-tertiary)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 8 }}>Customer</div>
+                <div>{invForm.customer_name || '—'}{invForm.customer_email && <span style={{ color: 'var(--text-tertiary)' }}> · {invForm.customer_email}</span>}</div>
+                <div style={{ color: 'var(--text-tertiary)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 8 }}>Total</div>
+                <div style={{ fontWeight: 600 }}>{money(invCalc.total)}</div>
+                {invForm.dueDate && (
+                  <>
+                    <div style={{ color: 'var(--text-tertiary)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 8 }}>Due</div>
+                    <div>{invForm.dueDate}</div>
+                  </>
+                )}
+              </div>
+            </Card>
+          </>
+        ) : (
         <Card className="p-5" style={{ borderLeft: '3px solid var(--success)' }}>
           <SectionTitle>💰 Client Settlement</SectionTitle>
           <div className="mt-3 space-y-1.5">
@@ -590,9 +985,10 @@ export default function ProcessPayment() {
             </div>
           </div>
         </Card>
+        )}
 
-        {/* FoundaPay Revenue — staff only */}
-        {!isClientUser && (
+        {/* FoundaPay Revenue — staff only (skipped in invoice mode; shown in invoice's own panel) */}
+        {!isClientUser && chargeType !== 'invoice' && (
           <Card className="p-5" style={{ borderLeft: '3px solid var(--accent)' }}>
             <SectionTitle>📊 FoundaPay Revenue</SectionTitle>
             <div className="mt-3 space-y-1.5">
@@ -610,8 +1006,8 @@ export default function ProcessPayment() {
           </Card>
         )}
 
-        {/* Result — direct charge */}
-        {result?.success && result.kind === 'direct' && (
+        {/* Result — direct charge (none in invoice mode) */}
+        {chargeType !== 'invoice' && result?.success && result.kind === 'direct' && (
           <Card className="p-5" style={{ borderLeft: '3px solid var(--success)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
               <CheckCircle2 size={18} color="var(--success)" />
@@ -634,7 +1030,7 @@ export default function ProcessPayment() {
         )}
 
         {/* Result — payment link */}
-        {result?.success && result.kind === 'link' && (
+        {chargeType !== 'invoice' && result?.success && result.kind === 'link' && (
           <Card className="p-5" style={{ borderLeft: '3px solid var(--accent)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
               <Link2 size={18} color="var(--accent)" />
@@ -673,7 +1069,7 @@ export default function ProcessPayment() {
         )}
 
         {/* Result — declined */}
-        {result && !result.success && (
+        {chargeType !== 'invoice' && result && !result.success && (
           <Card className="p-5" style={{ borderLeft: '3px solid var(--danger)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
               <XCircle size={18} color="var(--danger)" />

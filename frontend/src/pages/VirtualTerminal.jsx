@@ -134,7 +134,7 @@ export default function VirtualTerminal() {
         entity_id: form.entity_id || null,
       };
       const r = await api.post('/api/transactions', payload);
-      toast.success(`Saved #${r.id} — ${money(calc.net)} ${form.type.toLowerCase()}`);
+      toast.success(`Saved #${r.id} — ${money(calc.gross)} ${form.type.toLowerCase()}`);
       setForm((f) => ({ ...f, gross_amount: '', merchant_charges: '', notes: '', external_txn_id: '' }));
       loadAll();
     } catch (e) { setErr(e.message); toast.error(e.message); }
@@ -150,7 +150,16 @@ export default function VirtualTerminal() {
     return r;
   }, [todayEntries]);
 
-  const [tab, setTab] = useState('record');
+  // If we were navigated here with a charge-type hint (from PaymentLinks "+ New"),
+  // jump straight to the "Process Payment" tab. ProcessPayment then consumes the
+  // same hint to preselect direct/link/invoice.
+  const [tab, setTab] = useState(() => {
+    try {
+      const hint = sessionStorage.getItem('vt_default_charge_type');
+      if (hint) return 'process';
+    } catch {}
+    return 'record';
+  });
 
   return (
     <div className="p-6 max-w-[1500px] mx-auto">
@@ -352,7 +361,7 @@ export default function VirtualTerminal() {
             </Step>
 
             <Button type="submit" size="lg" className="w-full" disabled={saving}>
-              {saving ? 'Saving…' : `Save ${form.type} — ${money(calc.net)}`}
+              {saving ? 'Saving…' : `Save ${form.type} — ${money(calc.gross)}`}
             </Button>
           </form>
         </Card>

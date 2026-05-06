@@ -114,4 +114,188 @@ router.patch('/:id/items/:itemId/paid', async (req, res) => {
   }
 });
 
+// ━━━ PATCH /api/salary/:id — update disbursement (FX rate triggers PKR recalc) ━━━
+router.patch('/:id', async (req, res) => {
+  const c = await pool.connect();
+  try {
+    const b = req.body || {};
+    const fields = ['period', 'pay_date', 'exchange_rate', 'notes'];
+    const sets = [], params = [];
+    for (const f of fields) {
+      if (b[f] !== undefined) { params.push(b[f]); sets.push(`${f} = $${params.length}`); }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'No fields to update' });
+    params.push(req.params.id);
+
+    await c.query('BEGIN');
+    const r = await c.query(
+      `UPDATE salary_disbursements SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
+      params
+    );
+    if (!r.rows.length) { await c.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+
+    // If FX rate changed, recompute every item's amount_pkr = amount_usd * rate
+    if (b.exchange_rate !== undefined) {
+      const rate = parseFloat(b.exchange_rate) || 0;
+      await c.query(
+        `UPDATE salary_items SET amount_pkr = amount_usd * $1 WHERE disbursement_id = $2`,
+        [rate, req.params.id]
+      );
+      const tot = await c.query(
+        `SELECT COALESCE(SUM(amount_usd),0)::numeric(15,2) AS tu, COALESCE(SUM(amount_pkr),0)::numeric(15,2) AS tp
+           FROM salary_items WHERE disbursement_id = $1`,
+        [req.params.id]
+      );
+      await c.query(
+        `UPDATE salary_disbursements SET total_usd = $1, total_pkr = $2 WHERE id = $3`,
+        [tot.rows[0].tu, tot.rows[0].tp, req.params.id]
+      );
+    }
+
+    await c.query('COMMIT');
+    res.json(r.rows[0]);
+  } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
+    res.status(500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// ━━━ POST /api/salary/:id/items — add new employee ━━━
+router.post('/:id/items', async (req, res) => {
+  const c = await pool.connect();
+  try {
+    const b = req.body || {};
+    if (!b.employee_name) return res.status(400).json({ error: 'employee_name required' });
+
+    const sd = await c.query('SELECT exchange_rate FROM salary_disbursements WHERE id = $1', [req.params.id]);
+    if (!sd.rows.length) return res.status(404).json({ error: 'Disbursement not found' });
+    const rate = parseFloat(sd.rows[0].exchange_rate) || 280;
+    const usd = parseFloat(b.amount_usd) || 0;
+    const pkr = b.amount_pkr != null ? parseFloat(b.amount_pkr) : +(usd * rate).toFixed(2);
+
+    await c.query('BEGIN');
+    const r = await c.query(`
+      INSERT INTO salary_items
+        (disbursement_id, employee_name, full_name, bank_name, account_number,
+         amount_usd, amount_pkr, status, is_active, notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,'pending'),COALESCE($9,true),$10)
+      RETURNING *
+    `, [req.params.id, b.employee_name, b.full_name || null, b.bank_name || null,
+        b.account_number || null, usd, pkr, b.status, b.is_active, b.notes || null]);
+
+    // Update disbursement totals
+    const tot = await c.query(
+      `SELECT COALESCE(SUM(amount_usd),0)::numeric(15,2) AS tu, COALESCE(SUM(amount_pkr),0)::numeric(15,2) AS tp
+         FROM salary_items WHERE disbursement_id = $1`,
+      [req.params.id]
+    );
+    await c.query(
+      `UPDATE salary_disbursements SET total_usd = $1, total_pkr = $2 WHERE id = $3`,
+      [tot.rows[0].tu, tot.rows[0].tp, req.params.id]
+    );
+    await c.query('COMMIT');
+    res.status(201).json(r.rows[0]);
+  } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
+    res.status(500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// ━━━ PATCH /api/salary/:id/items/:itemId — edit employee ━━━
+router.patch('/:id/items/:itemId', async (req, res) => {
+  const c = await pool.connect();
+  try {
+    const b = req.body || {};
+    const fields = ['employee_name', 'full_name', 'bank_name', 'account_number',
+      'amount_usd', 'amount_pkr', 'status', 'is_active', 'notes'];
+    const sets = [], params = [];
+    for (const f of fields) {
+      if (b[f] !== undefined) { params.push(b[f]); sets.push(`${f} = $${params.length}`); }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'No fields to update' });
+
+    // If amount_usd changed but amount_pkr not provided, recalc using disbursement rate
+    if (b.amount_usd !== undefined && b.amount_pkr === undefined) {
+      const sd = await c.query('SELECT exchange_rate FROM salary_disbursements WHERE id = $1', [req.params.id]);
+      const rate = parseFloat(sd.rows[0]?.exchange_rate) || 280;
+      params.push(+((parseFloat(b.amount_usd) || 0) * rate).toFixed(2));
+      sets.push(`amount_pkr = $${params.length}`);
+    }
+
+    params.push(req.params.itemId, req.params.id);
+    await c.query('BEGIN');
+    const r = await c.query(
+      `UPDATE salary_items SET ${sets.join(', ')}
+         WHERE id = $${params.length - 1} AND disbursement_id = $${params.length} RETURNING *`,
+      params
+    );
+    if (!r.rows.length) { await c.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+
+    const tot = await c.query(
+      `SELECT COALESCE(SUM(amount_usd),0)::numeric(15,2) AS tu, COALESCE(SUM(amount_pkr),0)::numeric(15,2) AS tp
+         FROM salary_items WHERE disbursement_id = $1`,
+      [req.params.id]
+    );
+    await c.query(
+      `UPDATE salary_disbursements SET total_usd = $1, total_pkr = $2 WHERE id = $3`,
+      [tot.rows[0].tu, tot.rows[0].tp, req.params.id]
+    );
+    await c.query('COMMIT');
+    res.json(r.rows[0]);
+  } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
+    res.status(500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// ━━━ DELETE /api/salary/:id/items/:itemId — remove from payroll ━━━
+router.delete('/:id/items/:itemId', async (req, res) => {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const r = await c.query(
+      `DELETE FROM salary_items WHERE id = $1 AND disbursement_id = $2 RETURNING *`,
+      [req.params.itemId, req.params.id]
+    );
+    if (!r.rows.length) { await c.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+
+    const tot = await c.query(
+      `SELECT COALESCE(SUM(amount_usd),0)::numeric(15,2) AS tu, COALESCE(SUM(amount_pkr),0)::numeric(15,2) AS tp
+         FROM salary_items WHERE disbursement_id = $1`,
+      [req.params.id]
+    );
+    await c.query(
+      `UPDATE salary_disbursements SET total_usd = $1, total_pkr = $2 WHERE id = $3`,
+      [tot.rows[0].tu, tot.rows[0].tp, req.params.id]
+    );
+    await c.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
+    res.status(500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// ━━━ PATCH /api/salary/:id/mark-all-paid — flip every pending item to paid ━━━
+router.patch('/:id/mark-all-paid', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE salary_items SET status = 'paid', paid_at = NOW()
+         WHERE disbursement_id = $1 AND status != 'paid' RETURNING id`,
+      [req.params.id]
+    );
+    res.json({ ok: true, marked: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

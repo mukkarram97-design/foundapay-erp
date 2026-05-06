@@ -47,6 +47,240 @@ h1{color:#dc2626;margin:0 0 8px;font-size:22px}p{color:#6b7280;margin:8px 0}.bra
 <p>Please request a new payment link from the merchant.</p></div></body></html>`;
 }
 
+function cancelledHtml(brandName) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Link cancelled</title>
+<style>body{font-family:-apple-system,sans-serif;background:#f8f7ff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
+.c{background:white;border-radius:16px;padding:40px;max-width:420px;text-align:center;box-shadow:0 4px 24px rgba(124,58,237,0.12)}
+h1{color:#dc2626;margin:0 0 8px;font-size:22px}p{color:#6b7280;margin:8px 0}.brand{color:#7C3AED;font-weight:700;margin-bottom:16px}
+</style></head><body><div class="c"><div class="brand">${esc(brandName || 'FoundaPay')}</div>
+<h1>✕ This payment link was cancelled</h1>
+<p>The merchant cancelled this link. Please contact them for a new one.</p></div></body></html>`;
+}
+
+function paidReceiptHtml({ brandName, logoUrl, invoiceNumber, amount, paidAt, txnId, authCode, last4, downloadUrl }) {
+  const fmtAmt = fmtMoney(amount);
+  const paidDate = paidAt ? new Date(paidAt).toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' }) : '—';
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Receipt — ${esc(invoiceNumber || '')}</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(135deg,#f8f7ff 0%,#ede9fe 100%);min-height:100vh;margin:0;padding:24px;color:#1a1027}
+.card{background:white;border-radius:16px;max-width:480px;margin:24px auto;box-shadow:0 8px 32px rgba(124,58,237,0.16);overflow:hidden}
+.head{background:linear-gradient(135deg,#7C3AED,#5B21B6);color:#fff;padding:32px;text-align:center}
+.head .check{width:64px;height:64px;border-radius:50%;background:rgba(255,255,255,0.18);margin:0 auto 14px;display:flex;align-items:center;justify-content:center;font-size:36px}
+.head h1{margin:0;font-size:22px;font-weight:600}
+.head p{margin:6px 0 0;font-size:13px;opacity:0.85}
+.body{padding:28px 32px}
+.row{display:flex;justify-content:space-between;padding:8px 0;font-size:13px;border-bottom:1px solid #eee}
+.row:last-child{border:none}
+.row .l{color:#6b7280}
+.row .v{font-family:ui-monospace,monospace;color:#1a1027}
+.amount{font-size:36px;font-weight:700;color:#7C3AED;text-align:center;margin:18px 0 6px}
+.label{color:#6b7280;font-size:11px;text-align:center;text-transform:uppercase;letter-spacing:0.08em}
+.btn{display:block;background:#7C3AED;color:#fff;border:none;border-radius:10px;padding:12px 20px;font-size:14px;font-weight:600;text-decoration:none;text-align:center;margin-top:18px}
+.btn:hover{background:#6D28D9}
+.brand{text-align:center;color:#7C3AED;font-weight:700;font-size:15px;margin-bottom:6px}
+.footer{text-align:center;color:#9ca3af;font-size:11px;margin-top:18px}
+</style></head><body>
+<div class="card">
+  <div class="head">
+    <div class="check">✓</div>
+    <h1>Payment Received</h1>
+    <p>This invoice has already been paid.</p>
+  </div>
+  <div class="body">
+    ${logoUrl ? `<div style="text-align:center;margin-bottom:8px"><img src="${esc(logoUrl)}" alt="${esc(brandName)}" style="max-height:42px;max-width:200px;object-fit:contain"/></div>` : `<div class="brand">${esc(brandName || 'FoundaPay')}</div>`}
+    <div class="label">Amount paid</div>
+    <div class="amount">${esc(fmtAmt)}</div>
+    <div class="row"><span class="l">Invoice</span><span class="v">${esc(invoiceNumber || '—')}</span></div>
+    <div class="row"><span class="l">Paid on</span><span class="v">${esc(paidDate)}</span></div>
+    ${txnId ? `<div class="row"><span class="l">Transaction</span><span class="v">${esc(txnId)}</span></div>` : ''}
+    ${authCode ? `<div class="row"><span class="l">Auth code</span><span class="v">${esc(authCode)}</span></div>` : ''}
+    ${last4 ? `<div class="row"><span class="l">Card</span><span class="v">••${esc(last4)}</span></div>` : ''}
+    ${downloadUrl ? `<a href="${esc(downloadUrl)}" class="btn">Download Receipt PDF</a>` : ''}
+    <div class="footer">Powered by <strong>FoundaPay</strong></div>
+  </div>
+</div>
+</body></html>`;
+}
+
+// ━━━ Invoice payment page — full breakdown (line items, totals, due date) ━━━
+// Used when /pay/:token comes from an invoice (token.invoiceId set + invoice
+// fetched from DB). The customer-facing layout per spec.
+function invoicePaymentHtml({ token, payload, invoice, related, apiLoginId, publicClientKey, acceptUiSrc }) {
+  const amount = parseFloat(payload.amount).toFixed(2);
+  const amountFmt = fmtMoney(payload.amount);
+  let lineItems = invoice.line_items || [];
+  if (typeof lineItems === 'string') {
+    try { lineItems = JSON.parse(lineItems); } catch { lineItems = []; }
+  }
+  const taxPct = (parseFloat(invoice.tax_rate) || 0) * 100;
+  const dueDate = invoice.due_date
+    ? new Date(invoice.due_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+    : null;
+  const issuerName = related.entity_name || related.client_name || payload.brandName || 'FoundaPay';
+
+  const itemRows = lineItems.map((li, i) => `
+    <tr style="background:${i % 2 ? '#FAFAFA' : '#FFFFFF'}">
+      <td style="padding:10px 12px">${esc(li.description || '—')}</td>
+      <td style="padding:10px 12px;text-align:right;font-family:ui-monospace,monospace">${esc(String(li.quantity ?? '—'))}</td>
+      <td style="padding:10px 12px;text-align:right;font-family:ui-monospace,monospace">${esc(fmtMoney(li.line_total))}</td>
+    </tr>
+  `).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Invoice ${esc(invoice.invoice_number)} — ${esc(issuerName)}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="${acceptUiSrc}" charset="utf-8"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(135deg,#f8f7ff 0%,#ede9fe 100%);min-height:100vh;padding:24px;color:#1a1027}
+    .card{background:#fff;border-radius:16px;max-width:560px;margin:0 auto;box-shadow:0 8px 32px rgba(124,58,237,0.16);overflow:hidden}
+    .head{padding:28px 32px 22px;border-bottom:1px solid #eee}
+    .brand-row{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+    .brand-text{font-size:18px;font-weight:700;color:#7C3AED}
+    .invoice-num{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.08em}
+    .invoice-title{font-size:24px;font-weight:700;color:#1a1027;margin-top:2px}
+    .from-line{font-size:13px;color:#6b7280;margin-top:6px}
+    .body{padding:24px 32px}
+    .section-label{font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;font-weight:600;margin-bottom:6px}
+    .billto{margin-bottom:18px}
+    .billto-name{font-size:15px;color:#1a1027;font-weight:500}
+    .billto-email{font-size:13px;color:#6b7280;margin-top:2px}
+    table.items{width:100%;border-collapse:collapse;margin:8px 0 12px;font-size:13px}
+    table.items th{background:#7C3AED;color:#fff;padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;font-weight:600}
+    table.items th.r{text-align:right}
+    table.items td{border-bottom:1px solid #eee}
+    .totals{margin-top:14px;padding-top:14px;border-top:1px solid #eee}
+    .total-row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}
+    .total-row .l{color:#6b7280}
+    .total-row .v{font-family:ui-monospace,monospace;color:#1a1027}
+    .total-row.grand{margin-top:8px;padding-top:10px;border-top:1px solid #eee;font-weight:700;font-size:16px}
+    .total-row.grand .v{color:#7C3AED;font-size:18px}
+    .meta{display:flex;justify-content:space-between;padding:14px 0;color:#6b7280;font-size:12px;border-top:1px solid #eee;margin-top:14px}
+    .meta b{color:#1a1027;font-weight:500}
+    .pay-row{margin-top:18px}
+    button.AcceptUI{background:linear-gradient(135deg,#7C3AED 0%,#6D28D9 100%)!important;color:#fff!important;border:none!important;border-radius:12px!important;padding:14px 24px!important;font-size:16px!important;font-weight:600!important;cursor:pointer!important;width:100%!important;letter-spacing:0.01em!important;transition:transform 200ms,box-shadow 200ms!important}
+    button.AcceptUI:hover{transform:translateY(-1px);box-shadow:0 8px 20px rgba(124,58,237,0.35)!important}
+    .secure{text-align:center;color:#9ca3af;font-size:11px;margin-top:14px}
+    .secure b{color:#6b7280}
+    .err{background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;border-radius:10px;padding:10px 12px;margin-top:14px;font-size:13px;display:none}
+    .err.show{display:block}
+    .pending{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;z-index:1000}
+    .pending.show{display:flex}
+    .pending div{background:#fff;border-radius:14px;padding:24px 32px;font-weight:600;color:#1a1027}
+    .ok{text-align:center;padding:36px 32px}
+    .ok h1{color:#10B981;font-size:28px;margin-bottom:8px}
+    .ok p{color:#4b5563;margin-top:6px;font-size:14px}
+    .ok code{font-family:ui-monospace,monospace;color:#7C3AED;background:#f3f0ff;padding:2px 6px;border-radius:4px;font-size:12px}
+    @media (max-width:480px){.head,.body{padding-left:18px;padding-right:18px}.invoice-title{font-size:20px}}
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <div class="head">
+      <div class="brand-row">
+        ${payload.logoUrl
+          ? `<img src="${esc(payload.logoUrl)}" alt="${esc(issuerName)}" style="max-height:36px;max-width:140px;object-fit:contain"/>`
+          : `<div class="brand-text">${esc(issuerName)}</div>`
+        }
+      </div>
+      <div class="invoice-num">Invoice</div>
+      <div class="invoice-title">${esc(invoice.invoice_number)}</div>
+      <div class="from-line">From: <b>${esc(issuerName)}</b></div>
+    </div>
+
+    <div class="body">
+      ${invoice.customer_name || invoice.customer_email ? `
+      <div class="billto">
+        <div class="section-label">Bill to</div>
+        ${invoice.customer_name ? `<div class="billto-name">${esc(invoice.customer_name)}</div>` : ''}
+        ${invoice.customer_email ? `<div class="billto-email">${esc(invoice.customer_email)}</div>` : ''}
+      </div>` : ''}
+
+      <div class="section-label">Items</div>
+      <table class="items">
+        <thead><tr>
+          <th>Description</th>
+          <th class="r">Qty</th>
+          <th class="r">Amount</th>
+        </tr></thead>
+        <tbody>${itemRows || '<tr><td colspan="3" style="padding:14px;text-align:center;color:#6b7280">No items</td></tr>'}</tbody>
+      </table>
+
+      <div class="totals">
+        <div class="total-row"><span class="l">Subtotal</span><span class="v">${esc(fmtMoney(invoice.subtotal))}</span></div>
+        ${parseFloat(invoice.discount_amount) > 0 ? `<div class="total-row"><span class="l">Discount</span><span class="v">-${esc(fmtMoney(invoice.discount_amount))}</span></div>` : ''}
+        ${taxPct > 0 ? `<div class="total-row"><span class="l">Tax (${taxPct.toFixed(2)}%)</span><span class="v">${esc(fmtMoney(invoice.tax_amount))}</span></div>` : ''}
+        <div class="total-row grand"><span class="l">Total Due</span><span class="v">${esc(amountFmt)}</span></div>
+      </div>
+
+      ${dueDate ? `<div class="meta"><span>Due Date</span><b>${esc(dueDate)}</b></div>` : ''}
+
+      <div class="pay-row">
+        <button
+          type="button"
+          class="AcceptUI"
+          data-billingAddressOptions='{"show":true,"required":false}'
+          data-apiLoginID="${esc(apiLoginId)}"
+          data-clientKey="${esc(publicClientKey)}"
+          data-acceptUIFormBtnTxt="Pay ${esc(amountFmt)}"
+          data-acceptUIFormHeaderTxt="Secure Payment"
+          data-paymentOptions='{"showCreditCard":true,"showBankAccount":false}'
+          data-responseHandler="responseHandler">
+          Pay ${esc(amountFmt)} Securely
+        </button>
+      </div>
+
+      <div id="err" class="err"></div>
+
+      <div class="secure" style="margin-top:18px">🔒 <b>Card data sent directly to Authorize.net.</b></div>
+      <div class="secure" style="margin-top:4px">Your card never touches FoundaPay's servers.</div>
+      <div class="secure" style="margin-top:14px">Powered by <b>FoundaPay</b></div>
+    </div>
+  </div>
+
+  <div class="pending" id="pending"><div>Processing payment…</div></div>
+
+  <script>
+    var TOKEN = ${JSON.stringify(token)};
+    var BRAND = ${JSON.stringify(issuerName)};
+    function showError(msg){var e=document.getElementById('err');e.textContent=msg;e.classList.add('show');}
+    function responseHandler(response){
+      if(response.messages.resultCode==='Error'){showError(response.messages.message[0].text||'Payment error');return;}
+      document.getElementById('pending').classList.add('show');
+      fetch('/api/pay/process',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({token:TOKEN,
+          dataDescriptor:response.opaqueData.dataDescriptor,
+          dataValue:response.opaqueData.dataValue,
+          customer:{
+            firstName:response.customerInformation&&response.customerInformation.firstName||'',
+            lastName:response.customerInformation&&response.customerInformation.lastName||'',
+            email:response.customerInformation&&response.customerInformation.email||''
+          }})
+      }).then(function(r){return r.json();}).then(function(result){
+        document.getElementById('pending').classList.remove('show');
+        if(result.success){
+          document.getElementById('card').innerHTML='<div class="ok">'+
+            '<h1>✓ Payment Successful</h1>'+
+            '<p>Thank you. Your payment of <b>'+(result.amountFmt||'')+'</b> has been received.</p>'+
+            (result.authCode?'<p style="margin-top:14px">Auth code: <code>'+result.authCode+'</code></p>':'')+
+            (result.transactionId?'<p>Transaction ID: <code>'+result.transactionId+'</code></p>':'')+
+            '<p style="margin-top:18px;font-size:12px;color:#9ca3af">'+BRAND+'</p>'+
+            '</div>';
+          window.scrollTo(0,0);
+        } else { showError(result.message||'Payment was declined.'); }
+      }).catch(function(){
+        document.getElementById('pending').classList.remove('show');
+        showError('Network error. Please try again.');
+      });
+    }
+  </script>
+</body>
+</html>`;
+}
+
 function notFoundHtml() {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Not found</title>
 <style>body{font-family:-apple-system,sans-serif;background:#f8f7ff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
@@ -73,23 +307,45 @@ function shouldLogView(ip, invoiceNumber) {
   return true;
 }
 
+// Coarse user-agent → device class. Lightweight (no UAParser dep).
+function deviceFromUA(ua) {
+  if (!ua) return 'unknown';
+  const s = String(ua).toLowerCase();
+  if (/ipad|tablet|playbook|kindle/.test(s)) return 'tablet';
+  if (/iphone|android.*mobile|mobile|opera mini|blackberry|iemobile|webos/.test(s)) return 'mobile';
+  if (/bot|crawler|spider|crawl|slurp/.test(s)) return 'bot';
+  return 'desktop';
+}
+
+// Real client IP (respects nginx X-Forwarded-For when present).
+function realIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.ip;
+}
+
 async function trackView(payload, ip, userAgent) {
   if (!payload?.invoiceNumber) return;
   if (!shouldLogView(ip, payload.invoiceNumber)) return;
+  const device = deviceFromUA(userAgent);
   try {
-    // bump view_count on every (deduped) view, set viewed_at on first view
+    // bump view_count + set viewed_at + capture first-opened device info
     await pool.query(`
       UPDATE payment_link_requests
          SET view_count = COALESCE(view_count, 0) + 1,
-             viewed_at = COALESCE(viewed_at, NOW())
+             viewed_at = COALESCE(viewed_at, NOW()),
+             first_opened_at = COALESCE(first_opened_at, NOW()),
+             first_opened_ip = COALESCE(first_opened_ip, $2::inet),
+             first_opened_user_agent = COALESCE(first_opened_user_agent, $3),
+             first_opened_device = COALESCE(first_opened_device, $4)
        WHERE invoice_number = $1
-    `, [payload.invoiceNumber]);
+    `, [payload.invoiceNumber, ip || null, userAgent || null, device]);
 
     await logAudit({
       action: 'payment_link.viewed',
       entityType: 'payment_link_token',
       entityId: payload.invoiceNumber,
-      metadata: { amount: payload.amount, brand: payload.brandName },
+      metadata: { amount: payload.amount, brand: payload.brandName, device, ip },
       ipAddress: ip,
       userAgent,
     });
@@ -132,6 +388,49 @@ router.get('/pay/:token', async (req, res) => {
     return;
   }
 
+  // ━━━ Pre-flight: short-circuit on already-paid / cancelled links ━━━
+  // Looking up by invoice_number (set at link generation). On match we render
+  // a branded receipt page instead of letting the customer pay again.
+  if (payload.invoiceNumber) {
+    try {
+      const r = await pool.query(`
+        SELECT plr.status, plr.paid_at, plr.transaction_id,
+               t.processor_reference AS auth_code,
+               t.external_txn_id     AS authnet_tx_id,
+               t.card_last4
+          FROM payment_link_requests plr
+          LEFT JOIN transactions t ON t.id = plr.transaction_id
+         WHERE plr.invoice_number = $1
+         LIMIT 1
+      `, [payload.invoiceNumber]);
+      const row = r.rows[0];
+      if (row?.status === 'paid') {
+        const downloadUrl = row.transaction_id
+          ? `/api/transactions/${row.transaction_id}/receipt`
+          : null;
+        res.setHeader('Cache-Control', 'no-store');
+        res.type('html').send(paidReceiptHtml({
+          brandName: payload.brandName,
+          logoUrl: payload.logoUrl,
+          invoiceNumber: payload.invoiceNumber,
+          amount: payload.amount,
+          paidAt: row.paid_at,
+          txnId: row.authnet_tx_id,
+          authCode: row.auth_code,
+          last4: row.card_last4,
+          downloadUrl,
+        }));
+        return;
+      }
+      if (row?.status === 'cancelled') {
+        res.status(410).type('html').send(cancelledHtml(payload.brandName));
+        return;
+      }
+    } catch (e) {
+      console.warn('[pay/:token] paid-check failed:', e.message);
+    }
+  }
+
   // ━━━ Lazy upstream regen path ━━━
   // Default behavior unless the merchant explicitly chose self_hosted (Accept.js).
   const method = payload.method || 'auto';
@@ -172,7 +471,7 @@ router.get('/pay/:token', async (req, res) => {
 
   // ━━━ Self-hosted Accept.js path ━━━
   // Track customer view (fire-and-forget; render must not block on DB)
-  trackView(payload, req.ip, req.headers['user-agent']).catch(() => {});
+  trackView(payload, realIp(req), req.headers['user-agent']).catch(() => {});
 
   const apiLoginId = process.env.AUTHNET_LOGIN_ID || '';
   const publicClientKey = process.env.AUTHNET_PUBLIC_CLIENT_KEY || '';
@@ -187,6 +486,38 @@ router.get('/pay/:token', async (req, res) => {
   res.setHeader('Content-Security-Policy', "default-src 'self' https://*.authorize.net; script-src 'self' 'unsafe-inline' https://*.authorize.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.authorize.net; frame-src 'self' https://*.authorize.net; connect-src 'self' https://*.authorize.net");
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
+
+  // ━━━ Detailed invoice page — when token came from invoice flow ━━━
+  // Falls back to the simple page silently if the invoice can't be loaded
+  // (deleted / DB error) so customer can still pay.
+  if (payload.invoiceId) {
+    try {
+      const ir = await pool.query(`
+        SELECT i.*,
+               c.name AS client_name, c.logo_url AS client_logo_url,
+               e.legal_name AS entity_name, e.logo_url AS entity_logo_url
+          FROM invoices i
+          LEFT JOIN clients c  ON c.id = i.client_id
+          LEFT JOIN entities e ON e.id = i.entity_id
+         WHERE i.id = $1 AND i.is_deleted = false
+        `, [payload.invoiceId]);
+      if (ir.rows.length) {
+        const inv = ir.rows[0];
+        return res.type('html').send(invoicePaymentHtml({
+          token: req.params.token,
+          payload,
+          invoice: inv,
+          related: {
+            entity_name: inv.entity_name,
+            client_name: inv.client_name,
+          },
+          apiLoginId, publicClientKey, acceptUiSrc,
+        }));
+      }
+    } catch (e) {
+      console.warn('[pay/:token] invoice render failed, falling back:', e.message);
+    }
+  }
 
   res.type('html').send(`<!DOCTYPE html>
 <html lang="en">
@@ -343,15 +674,16 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
   if (!isFinite(amount) || amount <= 0) {
     return res.status(400).json({ success: false, message: 'Invalid amount on token' });
   }
-  const ipAddress = req.ip;
+  const ipAddress = realIp(req);
   const userAgent = req.headers['user-agent'];
+  const payerDevice = deviceFromUA(userAgent);
 
   // ━━━ 2. Audit: charge attempt (BEFORE Authorize.net call) ━━━
   await logAudit({
     action: 'payment_link.charge_attempted',
     entityType: 'payment_link_token',
     entityId: payload.invoiceNumber,
-    metadata: { amount, brand: payload.brandName, email: payload.customerEmail },
+    metadata: { amount, brand: payload.brandName, email: payload.customerEmail, device: payerDevice, ip: ipAddress },
     ipAddress, userAgent,
   });
 
@@ -502,14 +834,26 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
         ]);
       }
 
-      // UPDATE payment_link_requests by invoice_number
+      // UPDATE payment_link_requests by invoice_number — also captures payer device
       if (lockedVt?.invoice_number) {
         await c.query(`
           UPDATE payment_link_requests
              SET status = 'paid', transaction_id = $1, paid_at = NOW(),
-                 attempts = COALESCE(attempts, 0) + 1
+                 attempts = COALESCE(attempts, 0) + 1,
+                 payer_ip = $3::inet, payer_user_agent = $4, payer_device_type = $5
            WHERE invoice_number = $2
              AND status NOT IN ('paid','cancelled','refunded')
+        `, [tx.id, lockedVt.invoice_number, ipAddress || null, userAgent || null, payerDevice]);
+
+        // Bridge: if this payment was made for an invoice (matching invoice_number),
+        // flip the invoice to paid as well. Silent no-op if no invoice exists.
+        await c.query(`
+          UPDATE invoices
+             SET status = 'paid', paid_at = NOW(),
+                 paid_amount = COALESCE(paid_amount, total_amount),
+                 transaction_id = $1, updated_at = NOW()
+           WHERE invoice_number = $2 AND is_deleted = false
+             AND status NOT IN ('paid','cancelled')
         `, [tx.id, lockedVt.invoice_number]);
       }
 
@@ -547,6 +891,8 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
           authnet_transaction_id: result.transactionId,
           amount, last4: result.last4, brand: result.accountType,
           payment_link_invoice: payload.invoiceNumber,
+          device: payerDevice,
+          ip: ipAddress,
         },
         ipAddress, userAgent,
       });

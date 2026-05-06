@@ -75,6 +75,11 @@ function tabToSql(tab) {
       )`;
     case 'cancelled':
       return `plr.status IN ('cancelled','failed','refunded')`;
+    case 'invoices':
+      return `inv.id IS NOT NULL`;
+    case 'links':
+    case 'simple_links':
+      return `inv.id IS NULL`;
     case 'all':
     default:
       return `TRUE`;
@@ -103,6 +108,33 @@ function rowToResult(row, user) {
     attempts: row.attempts == null ? 0 : Number(row.attempts),
     last_error: row.last_error || null,
     transaction: row.transaction_id ? { id: row.transaction_id } : null,
+    type: row.invoice_id ? 'invoice' : 'link',
+    invoice: row.invoice_id ? {
+      id: row.invoice_id,
+      invoice_number: row.invoice_number_inv || row.invoice_number || null,
+      issue_date: row.invoice_issue_date || null,
+      due_date: row.invoice_due_date || null,
+      payment_terms: row.invoice_payment_terms || null,
+      subtotal: row.invoice_subtotal == null ? null : Number(row.invoice_subtotal),
+      tax_rate: row.invoice_tax_rate == null ? null : Number(row.invoice_tax_rate),
+      tax_amount: row.invoice_tax_amount == null ? null : Number(row.invoice_tax_amount),
+      discount_amount: row.invoice_discount == null ? null : Number(row.invoice_discount),
+      total_amount: row.invoice_total == null ? null : Number(row.invoice_total),
+      line_items: row.invoice_line_items || null,
+    } : null,
+    access_log: {
+      view_count: row.view_count == null ? 0 : Number(row.view_count),
+      viewed_at: row.viewed_at || null,
+      first_opened_at: row.first_opened_at || null,
+      first_opened_ip: row.first_opened_ip || null,
+      first_opened_user_agent: row.first_opened_user_agent || null,
+      first_opened_device: row.first_opened_device || null,
+      payer_ip: row.payer_ip || null,
+      payer_user_agent: row.payer_user_agent || null,
+      payer_device_type: row.payer_device_type || null,
+      copy_count: row.copy_count == null ? 0 : Number(row.copy_count),
+      last_copied_at: row.last_copied_at || null,
+    },
   };
   if (canSeeCreator(user) && row.created_by) {
     out.created_by = {
@@ -209,7 +241,10 @@ router.get('/', async (req, res) => {
     const whereSql = where.join(' AND ');
 
     const totalQ = pool.query(
-      `SELECT COUNT(*)::int AS total FROM payment_link_requests plr WHERE ${whereSql}`,
+      `SELECT COUNT(*)::int AS total
+         FROM payment_link_requests plr
+         LEFT JOIN invoices inv ON inv.invoice_number = plr.invoice_number AND inv.is_deleted = false
+        WHERE ${whereSql}`,
       params
     );
 
@@ -219,6 +254,14 @@ router.get('/', async (req, res) => {
          COUNT(*) FILTER (WHERE plr.status NOT IN ('paid','cancelled','failed','refunded','expired')
                             AND (plr.expires_at IS NULL OR plr.expires_at > NOW()))::int AS pending_count,
          COUNT(*) FILTER (WHERE plr.status = 'paid')::int       AS paid_count,
+         COUNT(*) FILTER (WHERE
+           plr.status = 'expired'
+           OR (plr.status NOT IN ('paid','cancelled','failed','refunded')
+               AND plr.expires_at IS NOT NULL AND plr.expires_at < NOW())
+         )::int                                                 AS expired_count,
+         COUNT(*) FILTER (WHERE plr.status IN ('cancelled','failed','refunded'))::int AS cancelled_count,
+         COUNT(*) FILTER (WHERE inv.id IS NOT NULL)::int        AS invoices_count,
+         COUNT(*) FILTER (WHERE inv.id IS NULL)::int            AS links_count,
          COUNT(*) FILTER (WHERE plr.status = 'paid'
                             AND plr.paid_at >= date_trunc('month', NOW()))::int AS paid_this_month,
          COALESCE(SUM(plr.amount) FILTER (WHERE plr.status = 'paid'), 0)::float AS total_volume_paid,
@@ -226,22 +269,44 @@ router.get('/', async (req, res) => {
                     FILTER (WHERE plr.status = 'paid'), 0)::float AS total_fp_fee_earned
          FROM payment_link_requests plr
          LEFT JOIN clients c ON c.id = plr.client_id
+         LEFT JOIN invoices inv ON inv.invoice_number = plr.invoice_number AND inv.is_deleted = false
          WHERE ${whereSql}`,
       params
     );
 
     const pageParams = params.slice();
     pageParams.push(limit); pageParams.push(offset);
+    // Joins:
+    //   inv  — invoices table by invoice_number → rich type='invoice' detail
+    //   cl   — copy events from audit_logs (action='payment_link.copied') aggregated per request
     const dataQ = pool.query(
       `SELECT plr.*, c.name AS client_name, c.card_pct,
               e.legal_name AS entity_name,
               m.processor_name,
-              u.name AS created_by_name, u.role AS created_by_role
+              u.name AS created_by_name, u.role AS created_by_role,
+              inv.id              AS invoice_id,
+              inv.invoice_number  AS invoice_number_inv,
+              inv.issue_date      AS invoice_issue_date,
+              inv.due_date        AS invoice_due_date,
+              inv.subtotal        AS invoice_subtotal,
+              inv.tax_rate        AS invoice_tax_rate,
+              inv.tax_amount      AS invoice_tax_amount,
+              inv.discount_amount AS invoice_discount,
+              inv.total_amount    AS invoice_total,
+              inv.line_items      AS invoice_line_items,
+              cl.copy_count, cl.last_copied_at
          FROM payment_link_requests plr
          LEFT JOIN clients   c ON c.id = plr.client_id
          LEFT JOIN entities  e ON e.id = plr.entity_id
          LEFT JOIN merchants m ON m.id = plr.merchant_id
          LEFT JOIN users     u ON u.id = plr.created_by
+         LEFT JOIN invoices  inv ON inv.invoice_number = plr.invoice_number AND inv.is_deleted = false
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*)::int AS copy_count, MAX(created_at) AS last_copied_at
+             FROM audit_logs
+            WHERE action = 'payment_link.copied'
+              AND resource_id = plr.id::text
+         ) cl ON TRUE
         WHERE ${whereSql}
         ORDER BY ${sortCol} ${sortDir}
         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
@@ -380,24 +445,49 @@ router.get('/:id', async (req, res) => {
       SELECT plr.*, c.name AS client_name, c.card_pct,
              e.legal_name AS entity_name,
              m.processor_name,
-             u.name AS created_by_name, u.role AS created_by_role
+             u.name AS created_by_name, u.role AS created_by_role,
+             inv.id              AS invoice_id,
+             inv.invoice_number  AS invoice_number_inv,
+             inv.issue_date      AS invoice_issue_date,
+             inv.due_date        AS invoice_due_date,
+             inv.subtotal        AS invoice_subtotal,
+             inv.tax_rate        AS invoice_tax_rate,
+             inv.tax_amount      AS invoice_tax_amount,
+             inv.discount_amount AS invoice_discount,
+             inv.total_amount    AS invoice_total,
+             inv.line_items      AS invoice_line_items,
+             (SELECT COUNT(*)::int FROM audit_logs
+               WHERE action = 'payment_link.copied' AND resource_id = plr.id::text) AS copy_count,
+             (SELECT MAX(created_at) FROM audit_logs
+               WHERE action = 'payment_link.copied' AND resource_id = plr.id::text) AS last_copied_at
         FROM payment_link_requests plr
         LEFT JOIN clients   c ON c.id = plr.client_id
         LEFT JOIN entities  e ON e.id = plr.entity_id
         LEFT JOIN merchants m ON m.id = plr.merchant_id
         LEFT JOIN users     u ON u.id = plr.created_by
+        LEFT JOIN invoices  inv ON inv.invoice_number = plr.invoice_number AND inv.is_deleted = false
        WHERE ${where}
     `, params);
     if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
 
+    // Timeline pulls events keyed on either:
+    //   resource='payment_link_requests' resource_id=plr.id  (admin-side: created/cancelled/copied)
+    //   resource='payment_link_token'    resource_id=plr.invoice_number (customer-side: viewed/paid/declined)
+    //   resource='transactions'          resource_id=plr.transaction_id (settlement)
+    const inv_no = r.rows[0].invoice_number || null;
+    const tx_id  = r.rows[0].transaction_id != null ? String(r.rows[0].transaction_id) : null;
+    const tlParams = [String(req.params.id)];
+    let tlWhere = `(al.resource = 'payment_link_requests' AND al.resource_id = $1)`;
+    if (inv_no) { tlParams.push(String(inv_no)); tlWhere += ` OR (al.resource = 'payment_link_token' AND al.resource_id = $${tlParams.length})`; }
+    if (tx_id)  { tlParams.push(tx_id);          tlWhere += ` OR (al.resource = 'transactions' AND al.resource_id = $${tlParams.length})`; }
     const tl = await pool.query(`
-      SELECT al.id, al.action, al.new_value, al.created_at,
+      SELECT al.id, al.action, al.new_value, al.created_at, al.ip_address,
              al.user_id, u.name AS user_name, u.role AS user_role
         FROM audit_logs al
         LEFT JOIN users u ON u.id = al.user_id
-       WHERE al.resource = 'payment_link_requests' AND al.resource_id = $1
+       WHERE ${tlWhere}
        ORDER BY al.created_at ASC
-    `, [String(req.params.id)]);
+    `, tlParams);
 
     res.json({
       link: rowToResult(r.rows[0], req.user),
@@ -405,6 +495,7 @@ router.get('/:id', async (req, res) => {
         id: e.id,
         action: e.action,
         at: e.created_at,
+        ip: e.ip_address || null,
         actor: e.user_id ? { id: e.user_id, name: e.user_name, role: e.user_role } : null,
         metadata: e.new_value,
       })),
@@ -474,6 +565,38 @@ router.post('/:id/cancel', async (req, res) => {
     });
 
     res.json(r.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ━━━ POST /:id/copy-log ─────────────────────────────────────
+// Frontend hits this when an operator copies the public URL.
+// Audit-only; no DB row mutation. Idempotency-aware via 60s dedup
+// per (user, link) so rapid-fire copies don't spam the timeline.
+const COPY_DEDUP_TTL_MS = 60_000;
+const copyDedup = new Map();
+router.post('/:id/copy-log', async (req, res) => {
+  try {
+    const key = `${req.user.id}:${req.params.id}`;
+    const now = Date.now();
+    const exp = copyDedup.get(key);
+    if (!exp || exp <= now) {
+      copyDedup.set(key, now + COPY_DEDUP_TTL_MS);
+      if (copyDedup.size > 5000) {
+        for (const [k, e] of copyDedup) if (e < now) copyDedup.delete(k);
+      }
+      await logAudit({
+        action: 'payment_link.copied',
+        entityType: 'payment_link_requests',
+        entityId: req.params.id,
+        userId: req.user.id,
+        metadata: { surface: req.body?.surface || 'list' }, // 'list' | 'detail' | 'kebab'
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+    }
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

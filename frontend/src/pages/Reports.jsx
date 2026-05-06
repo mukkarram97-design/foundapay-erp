@@ -54,7 +54,24 @@ const TABS = [
   { id: 'cs',      label: 'Client Statements' },
   { id: 'tx',      label: 'Transactions Report' },
   { id: 'entity',  label: 'Entity Report' },
+  { id: 'rev',     label: 'Revenue Summary' },
+  { id: 'recon',   label: 'Payout Recon' },
+  { id: 'tax',     label: 'Tax Summary' },
+  { id: 'export',  label: 'Custom Export' },
 ];
+
+// Direct-download helper (auth-bearing fetch, then save blob).
+async function downloadFromApi(url, filename) {
+  const token = localStorage.getItem('foundapay_token');
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+  const blob = await r.blob();
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objUrl; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Main page
@@ -138,7 +155,298 @@ export default function Reports() {
       {tab === 'cs'     && <ClientStatementsTab from={from} to={to} />}
       {tab === 'tx'     && <TransactionsReportTab from={from} to={to} />}
       {tab === 'entity' && <EntityReportTab from={from} to={to} />}
+      {tab === 'rev'    && <RevenueSummaryTab from={from} to={to} />}
+      {tab === 'recon'  && <PayoutReconTab from={from} to={to} />}
+      {tab === 'tax'    && <TaxSummaryTab from={from} to={to} />}
+      {tab === 'export' && <CustomExportTab from={from} to={to} />}
     </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Revenue Summary
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function RevenueSummaryTab({ from, to }) {
+  const [groupBy, setGroupBy] = useState('month');
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+
+  async function load() {
+    setErr(null);
+    try {
+      const r = await api.get(`/api/reports/revenue-summary?from=${from}&to=${to}&group_by=${groupBy}`);
+      setData(r);
+    } catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [from, to, groupBy]);
+
+  if (err) return <Alert tone="error">{err}</Alert>;
+  if (!data) return <Card className="p-6" style={{ color: 'var(--text-secondary)' }}>Loading…</Card>;
+  const t = data.totals || {};
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Label>Group by</Label>
+        <Select value={groupBy} onChange={(e) => setGroupBy(e.target.value)} style={{ maxWidth: 140 }}>
+          <option value="day">Day</option>
+          <option value="week">Week</option>
+          <option value="month">Month</option>
+        </Select>
+        <span style={{ flex: 1 }} />
+        <Button variant="secondary" onClick={() => downloadFromApi(`/api/reports/revenue-summary?from=${from}&to=${to}&group_by=${groupBy}&format=pdf`, `revenue-summary-${from}-to-${to}.pdf`)}><Download size={12} /> PDF</Button>
+        <Button variant="secondary" onClick={() => downloadFromApi(`/api/reports/revenue-summary?from=${from}&to=${to}&group_by=${groupBy}&format=csv`, `revenue-summary-${from}-to-${to}.csv`)}><Download size={12} /> CSV</Button>
+        <Button variant="secondary" onClick={() => window.print()}><FileText size={12} /> Print</Button>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <MiniStat label="Gross volume" value={money(t.gross)} />
+        <MiniStat label="FP revenue" value={money(t.revenue)} tone="success" />
+        <MiniStat label="Net to clients" value={money(t.net)} tone="accent" />
+        <MiniStat label="Transactions" value={t.tx_count || 0} />
+      </div>
+
+      <Card>
+        <div style={{ padding: '14px 16px 6px', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)' }}>
+          By {groupBy}
+        </div>
+        <Table>
+          <Thead><Tr><Th>Period</Th><Th className="text-right">Gross</Th><Th className="text-right">Revenue</Th><Th className="text-right">Net</Th><Th className="text-right">#</Th></Tr></Thead>
+          <tbody>{(data.byPeriod || []).map((r) => (
+            <Tr key={r.period}>
+              <Td>{r.period}</Td>
+              <Td className="text-right font-mono">{money(r.gross)}</Td>
+              <Td className="text-right font-mono">{money(r.revenue)}</Td>
+              <Td className="text-right font-mono">{money(r.net)}</Td>
+              <Td className="text-right">{r.tx_count}</Td>
+            </Tr>
+          ))}</tbody>
+        </Table>
+      </Card>
+
+      {(data.byClient || []).length > 0 && (
+        <Card>
+          <div style={{ padding: '14px 16px 6px', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)' }}>
+            By client
+          </div>
+          <Table>
+            <Thead><Tr><Th>Client</Th><Th className="text-right">Gross</Th><Th className="text-right">Revenue</Th><Th className="text-right">#</Th></Tr></Thead>
+            <tbody>{data.byClient.map((r) => (
+              <Tr key={r.client_name}>
+                <Td>{r.client_name || '—'}</Td>
+                <Td className="text-right font-mono">{money(r.gross)}</Td>
+                <Td className="text-right font-mono">{money(r.revenue)}</Td>
+                <Td className="text-right">{r.tx_count}</Td>
+              </Tr>
+            ))}</tbody>
+          </Table>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Payout Reconciliation
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function PayoutReconTab({ from, to }) {
+  const [clientId, setClientId] = useState('');
+  const [clients, setClients] = useState([]);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    api.get('/api/clients').then((r) => setClients(r.rows || [])).catch(() => {});
+  }, []);
+
+  async function load() {
+    setErr(null);
+    try {
+      const params = new URLSearchParams({ from, to });
+      if (clientId) params.set('client_id', clientId);
+      setData(await api.get(`/api/reports/payout-reconciliation?${params.toString()}`));
+    } catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [from, to, clientId]);
+
+  if (err) return <Alert tone="error">{err}</Alert>;
+  if (!data) return <Card className="p-6" style={{ color: 'var(--text-secondary)' }}>Loading…</Card>;
+  const t = data.totals || {};
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Label>Client</Label>
+        <Select value={clientId} onChange={(e) => setClientId(e.target.value)} style={{ maxWidth: 240 }}>
+          <option value="">All clients</option>
+          {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </Select>
+        <span style={{ flex: 1 }} />
+        <Button variant="secondary" onClick={() => {
+          const p = new URLSearchParams({ from, to, format: 'pdf' });
+          if (clientId) p.set('client_id', clientId);
+          downloadFromApi(`/api/reports/payout-reconciliation?${p.toString()}`, `payout-recon-${from}-to-${to}.pdf`);
+        }}><Download size={12} /> PDF</Button>
+        <Button variant="secondary" onClick={() => {
+          const p = new URLSearchParams({ from, to, format: 'csv' });
+          if (clientId) p.set('client_id', clientId);
+          downloadFromApi(`/api/reports/payout-reconciliation?${p.toString()}`, `payout-recon-${from}-to-${to}.csv`);
+        }}><Download size={12} /> CSV</Button>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <MiniStat label="Received" value={money(t.received)} />
+        <MiniStat label="Paid out" value={money(t.paid_out)} tone="success" />
+        <MiniStat label="Reserve held" value={money(t.reserve_held)} tone="accent" />
+        <MiniStat label="Pending payout" value={money(t.pending)} tone="warning" />
+      </div>
+
+      <Card>
+        <div style={{ padding: '14px 16px 6px', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)' }}>
+          Payouts ({(data.payouts || []).length})
+        </div>
+        <Table>
+          <Thead><Tr><Th>Date</Th><Th className="text-right">Amount</Th><Th>Method</Th><Th>Reference</Th><Th>Status</Th></Tr></Thead>
+          <tbody>{(data.payouts || []).map((p) => (
+            <Tr key={p.id}>
+              <Td>{dateOnly(p.created_at)}</Td>
+              <Td className="text-right font-mono">{money(p.amount)} {p.currency}</Td>
+              <Td>{p.payout_method}</Td>
+              <Td className="text-xs font-mono">{p.reference_number || '—'}</Td>
+              <Td><Badge tone={p.status === 'sent' ? 'success' : 'warning'}>{p.status}</Badge></Td>
+            </Tr>
+          ))}</tbody>
+        </Table>
+      </Card>
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Tax Summary
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function TaxSummaryTab({ from, to }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    setErr(null);
+    api.get(`/api/reports/tax-summary?from=${from}&to=${to}`).then(setData).catch((e) => setErr(e.message));
+  }, [from, to]);
+
+  if (err) return <Alert tone="error">{err}</Alert>;
+  if (!data) return <Card className="p-6" style={{ color: 'var(--text-secondary)' }}>Loading…</Card>;
+  const t = data.totals || {};
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span style={{ flex: 1 }} />
+        <Button variant="secondary" onClick={() => downloadFromApi(`/api/reports/tax-summary?from=${from}&to=${to}&format=pdf`, `tax-summary-${from}-to-${to}.pdf`)}><Download size={12} /> PDF</Button>
+        <Button variant="secondary" onClick={() => downloadFromApi(`/api/reports/tax-summary?from=${from}&to=${to}&format=csv`, `tax-summary-${from}-to-${to}.csv`)}><Download size={12} /> CSV</Button>
+      </div>
+
+      <Card className="p-5">
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+          <span>Gross income (commission + reserves released)</span>
+          <span style={{ fontFamily: 'ui-monospace, monospace' }}>{money(t.gross_income)}</span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+          <span>Less: deductible expenses</span>
+          <span style={{ fontFamily: 'ui-monospace, monospace', color: 'var(--text-secondary)' }}>-{money(t.deductible_expenses)}</span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+          <span>Less: processor + chargeback fees borne</span>
+          <span style={{ fontFamily: 'ui-monospace, monospace', color: 'var(--text-secondary)' }}>-{money(t.fees_borne)}</span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '14px 0 0', fontWeight: 700 }}>
+          <span>Net taxable income</span>
+          <span style={{ fontFamily: 'ui-monospace, monospace', color: 'var(--accent)', fontSize: 18 }}>{money(t.net_taxable)}</span>
+        </div>
+      </Card>
+
+      {(data.expenses_by_category || []).length > 0 && (
+        <Card>
+          <div style={{ padding: '14px 16px 6px', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)' }}>
+            Expenses by category
+          </div>
+          <Table>
+            <Thead><Tr><Th>Category</Th><Th className="text-right">Amount</Th></Tr></Thead>
+            <tbody>{data.expenses_by_category.map((c) => (
+              <Tr key={c.category}><Td>{c.category}</Td><Td className="text-right font-mono">{money(c.total)}</Td></Tr>
+            ))}</tbody>
+          </Table>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Custom Transaction Export
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function CustomExportTab({ from, to }) {
+  const [filters, setFilters] = useState({ status: '', type: '', payment_method: '', source: '', q: '' });
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="space-y-4">
+      <Card className="p-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <div><Label>Status</Label>
+            <Select value={filters.status} onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}>
+              <option value="">All</option>
+              <option>Completed</option><option>Hold</option><option>Failed</option><option>Refunded</option><option>Voided</option><option>Charge Back</option>
+            </Select>
+          </div>
+          <div><Label>Type</Label>
+            <Select value={filters.type} onChange={(e) => setFilters((f) => ({ ...f, type: e.target.value }))}>
+              <option value="">All</option>
+              <option>Received</option><option>Paid</option><option>Expense</option><option>Advance Paid</option>
+            </Select>
+          </div>
+          <div><Label>Method</Label>
+            <Select value={filters.payment_method} onChange={(e) => setFilters((f) => ({ ...f, payment_method: e.target.value }))}>
+              <option value="">All</option>
+              <option>Debit/Credit Cards</option><option>ACH</option><option>Wire Transfer</option><option>Zelle</option><option>Cheque</option>
+            </Select>
+          </div>
+          <div><Label>Source</Label>
+            <Select value={filters.source} onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}>
+              <option value="">All</option>
+              <option value="manual">Manual</option><option value="virtual_terminal">VT</option><option value="payment_link">Payment link</option>
+            </Select>
+          </div>
+          <div className="col-span-2"><Label>Search</Label>
+            <Input placeholder="Customer/email/auth code" value={filters.q}
+              onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))} />
+          </div>
+        </div>
+        <div className="flex items-center gap-2 mt-4">
+          <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>Period: {from} → {to}. Up to 10 000 rows per export.</span>
+          <span style={{ flex: 1 }} />
+          <Button disabled={busy} onClick={async () => {
+            setBusy(true);
+            try {
+              const p = new URLSearchParams({ from, to, ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v)) });
+              await downloadFromApi(`/api/reports/transaction-export?${p.toString()}`, `transactions-${from}-to-${to}.csv`);
+            } catch (e) { alert(e.message); }
+            finally { setBusy(false); }
+          }}>
+            <Download size={12} /> {busy ? 'Exporting…' : 'Export CSV'}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, tone }) {
+  const colors = { success: 'var(--success)', warning: 'var(--warning)', accent: 'var(--accent)' };
+  return (
+    <Card className="p-3">
+      <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)' }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, marginTop: 4, color: colors[tone] || 'var(--text-primary)' }}>{value}</div>
+    </Card>
   );
 }
 

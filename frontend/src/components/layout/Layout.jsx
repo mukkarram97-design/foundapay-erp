@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import {
-  LayoutDashboard, Keyboard, Link2, ListChecks,
-  Users, Wallet, AlertTriangle, Lock, Repeat,
-  Building2, CreditCard, Shuffle,
+  LayoutDashboard, Keyboard, Link2, ListChecks, FileSpreadsheet,
+  Users, Wallet, AlertTriangle, Lock, Repeat, ClipboardCheck, Globe,
+  Building2, CreditCard, Shuffle, Landmark,
   CreditCard as CardIcon, Receipt, Boxes,
   BarChart3, CalendarDays, TrendingUp, UserCog, BookOpen,
   ShieldCheck, FileText, Settings, ChevronLeft, ChevronDown, LogOut, Briefcase, Users2,
@@ -18,7 +18,9 @@ const NAV_GROUPS = [
   { id: 'ops', label: 'Operations', items: [
     { to: '/dashboard',        label: 'Dashboard',        icon: LayoutDashboard },
     { to: '/virtual-terminal', label: 'Virtual Terminal', icon: Keyboard, hot: true },
-    { to: '/payment-links',    label: 'Payment Links',    icon: Link2 },
+    { to: '/payment-links',    label: 'Payment Requests', icon: Link2 },
+    { to: '/approvals',        label: 'Approvals',        icon: ClipboardCheck, key: 'approvals' },
+    { to: '/remittance',       label: 'Remittance',       icon: Globe },
     { to: '/transactions',     label: 'Master Ledger',    icon: ListChecks },
   ]},
   { id: 'finance', label: 'Finance', items: [
@@ -32,6 +34,7 @@ const NAV_GROUPS = [
   ]},
   { id: 'infra', label: 'Infrastructure', items: [
     { to: '/entities',  label: 'Entities',     icon: Building2 },
+    { to: '/banks',     label: 'Bank Accounts', icon: Landmark },
     { to: '/merchants', label: 'Merchants',    icon: CreditCard },
     { to: '/routing',   label: 'Auto-Routing', icon: Shuffle },
   ]},
@@ -313,7 +316,11 @@ function derivePageTitle(p) {
     '/dashboard': 'Dashboard',
     '/virtual-terminal': 'Virtual Terminal',
     '/transactions': 'Master Ledger',
-    '/payment-links': 'Payment Links',
+    '/payment-links': 'Payment Requests',
+    '/approvals': 'Approvals',
+    '/remittance': 'Remittance',
+    '/invoices': 'Invoices',
+    '/banks': 'Bank Accounts',
     '/clients': 'Clients',
     '/payouts': 'Payouts',
     '/chargebacks': 'Chargebacks',

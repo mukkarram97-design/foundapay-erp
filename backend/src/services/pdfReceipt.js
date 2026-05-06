@@ -310,4 +310,173 @@ function buildStatement({ client, period, transactions, totals }, stream) {
   doc.end();
 }
 
-module.exports = { buildReceipt, buildStatement };
+// ━━━ Invoice — issued to a customer, optionally paid ─────────
+function buildInvoice(inv, related = {}, stream) {
+  const doc = new PDFDocument({ size: 'A4', margin: 0 });
+  doc.pipe(stream);
+
+  const W = doc.page.width;
+  const H = doc.page.height;
+  const M = 40; // page margin
+
+  // ━━━ Header — purple gradient bar ━━━
+  doc.rect(0, 0, W, 110).fill(PURPLE);
+  doc.rect(0, 100, W, 10).fill(PURPLE_DARK);
+
+  // Logo (entity > client) on the left
+  const logoPath = resolveLogoPath(related.logo_url);
+  if (logoPath) {
+    try { doc.image(logoPath, M, 22, { fit: [140, 56], align: 'left', valign: 'center' }); }
+    catch { /* fallback to text below */ }
+  }
+
+  // Issuer block (right side of header)
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(28)
+     .text('INVOICE', M, 30, { width: W - M * 2, align: 'right' });
+  doc.font('Helvetica').fontSize(11)
+     .text(`#${inv.invoice_number}`, M, 64, { width: W - M * 2, align: 'right' });
+
+  // ━━━ PAID stamp (only on paid invoices) ━━━
+  const isPaid = String(inv.status || '').toLowerCase() === 'paid';
+  if (isPaid) {
+    drawPaidStamp(doc, { x: W - 220, y: 130 });
+  }
+
+  // ━━━ Issuer / customer parties — two columns ━━━
+  let y = 130;
+  const colW = (W - M * 2 - 20) / 2;
+  const issuerName = related.entity_name || related.client_name || 'FoundaPay';
+
+  doc.fillColor(PURPLE).font('Helvetica-Bold').fontSize(9).text('FROM', M, y);
+  doc.fillColor(TEXT_DARK).font('Helvetica-Bold').fontSize(13).text(issuerName, M, y + 14);
+  doc.font('Helvetica').fontSize(10).fillColor(TEXT_MUTED);
+  let yi = y + 32;
+  if (related.entity_address) {
+    doc.text(String(related.entity_address).slice(0, 200), M, yi, { width: colW });
+    yi += 28;
+  }
+  if (related.entity_email)  doc.text(related.entity_email, M, yi),  yi += 14;
+  if (related.entity_phone)  doc.text(related.entity_phone, M, yi),  yi += 14;
+
+  const col2X = M + colW + 20;
+  doc.fillColor(PURPLE).font('Helvetica-Bold').fontSize(9).text('BILL TO', col2X, y);
+  doc.fillColor(TEXT_DARK).font('Helvetica-Bold').fontSize(13)
+     .text(inv.customer_name || '—', col2X, y + 14);
+  doc.font('Helvetica').fontSize(10).fillColor(TEXT_MUTED);
+  let yc = y + 32;
+  if (inv.customer_email)   { doc.text(inv.customer_email, col2X, yc, { width: colW });   yc += 14; }
+  if (inv.customer_phone)   { doc.text(inv.customer_phone, col2X, yc, { width: colW });   yc += 14; }
+  if (inv.customer_address) { doc.text(String(inv.customer_address).slice(0, 200), col2X, yc, { width: colW }); yc += 28; }
+
+  // ━━━ Invoice meta strip ━━━
+  y = Math.max(yi, yc) + 18;
+  doc.rect(M, y, W - M * 2, 50).fill(PURPLE_LIGHT);
+  doc.fillColor(TEXT_MUTED).font('Helvetica-Bold').fontSize(9);
+  const metaW = (W - M * 2) / 4;
+  doc.text('ISSUE DATE', M + 12, y + 10);
+  doc.text('DUE DATE',   M + 12 + metaW, y + 10);
+  doc.text('STATUS',     M + 12 + metaW * 2, y + 10);
+  doc.text('AMOUNT DUE', M + 12 + metaW * 3, y + 10);
+  doc.fillColor(TEXT_DARK).font('Helvetica-Bold').fontSize(12);
+  doc.text(fmtDate(inv.issue_date), M + 12, y + 26);
+  doc.text(inv.due_date ? fmtDate(inv.due_date) : '—', M + 12 + metaW, y + 26);
+  const statusLabel = isPaid ? 'PAID' : String(inv.status || 'DRAFT').toUpperCase();
+  doc.fillColor(isPaid ? PAID_GREEN : PURPLE_DARK)
+     .text(statusLabel, M + 12 + metaW * 2, y + 26);
+  doc.fillColor(TEXT_DARK)
+     .text(fmtMoney(inv.total_amount), M + 12 + metaW * 3, y + 26);
+
+  // ━━━ Line items table ━━━
+  y += 70;
+  const tableX = M, tableW = W - M * 2;
+  const colDesc = tableW * 0.55;
+  const colQty  = tableW * 0.10;
+  const colPrice = tableW * 0.15;
+  const colTotal = tableW * 0.20;
+
+  // Header row
+  doc.rect(tableX, y, tableW, 28).fill(PURPLE);
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(10);
+  doc.text('DESCRIPTION', tableX + 12, y + 10, { width: colDesc - 12 });
+  doc.text('QTY',         tableX + colDesc, y + 10, { width: colQty, align: 'right' });
+  doc.text('UNIT PRICE',  tableX + colDesc + colQty, y + 10, { width: colPrice - 8, align: 'right' });
+  doc.text('LINE TOTAL',  tableX + colDesc + colQty + colPrice, y + 10, { width: colTotal - 12, align: 'right' });
+  y += 28;
+
+  // Body rows
+  let lineItems = inv.line_items || [];
+  if (typeof lineItems === 'string') {
+    try { lineItems = JSON.parse(lineItems); } catch { lineItems = []; }
+  }
+  doc.fillColor(TEXT_DARK).font('Helvetica').fontSize(10);
+  const ROW_H = 28;
+  lineItems.forEach((li, i) => {
+    const ry = y;
+    if (i % 2 === 1) {
+      doc.rect(tableX, ry, tableW, ROW_H).fill('#FAFAFA');
+      doc.fillColor(TEXT_DARK);
+    }
+    doc.font('Helvetica').fontSize(10).fillColor(TEXT_DARK);
+    doc.text(String(li.description || '').slice(0, 100), tableX + 12, ry + 9, { width: colDesc - 12, ellipsis: true });
+    doc.text(String(li.quantity ?? '—'), tableX + colDesc, ry + 9, { width: colQty, align: 'right' });
+    doc.text(fmtMoney(li.unit_price), tableX + colDesc + colQty, ry + 9, { width: colPrice - 8, align: 'right' });
+    doc.text(fmtMoney(li.line_total), tableX + colDesc + colQty + colPrice, ry + 9, { width: colTotal - 12, align: 'right' });
+    doc.strokeColor(BORDER).lineWidth(0.5).moveTo(tableX, ry + ROW_H).lineTo(tableX + tableW, ry + ROW_H).stroke();
+    y += ROW_H;
+  });
+
+  // ━━━ Totals block (right-aligned) ━━━
+  y += 8;
+  const totalsX = tableX + tableW * 0.55;
+  const totalsW = tableW * 0.45;
+  function totalRow(label, value, opts = {}) {
+    doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(opts.bold ? 11 : 10)
+       .fillColor(opts.color || TEXT_DARK);
+    doc.text(label, totalsX, y, { width: totalsW * 0.55, align: 'right' });
+    doc.text(value, totalsX + totalsW * 0.55, y, { width: totalsW * 0.45 - 12, align: 'right' });
+    y += opts.bold ? 18 : 16;
+  }
+  totalRow('Subtotal',       fmtMoney(inv.subtotal));
+  if (parseFloat(inv.discount_amount) > 0) totalRow('Discount', `-${fmtMoney(inv.discount_amount)}`);
+  if (parseFloat(inv.tax_rate) > 0) {
+    totalRow(`Tax (${(parseFloat(inv.tax_rate) * 100).toFixed(2)}%)`, fmtMoney(inv.tax_amount));
+  }
+  // Grand total — purple highlight
+  doc.rect(totalsX, y, totalsW, 32).fill(PURPLE);
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(11)
+     .text('TOTAL DUE', totalsX, y + 11, { width: totalsW * 0.55, align: 'right' });
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(13)
+     .text(fmtMoney(inv.total_amount), totalsX + totalsW * 0.55, y + 10, { width: totalsW * 0.45 - 12, align: 'right' });
+  y += 40;
+
+  // ━━━ Pay link / payment instructions ━━━
+  if (inv.payment_link_url && !isPaid) {
+    doc.rect(M, y, tableW, 60).fill(PURPLE_LIGHT);
+    doc.fillColor(PURPLE_DARK).font('Helvetica-Bold').fontSize(11)
+       .text('PAY ONLINE', M + 16, y + 12);
+    doc.fillColor(TEXT_DARK).font('Helvetica').fontSize(10)
+       .text(inv.payment_link_url, M + 16, y + 32, { width: tableW - 32, ellipsis: true });
+    y += 70;
+  }
+
+  // ━━━ Notes ━━━
+  if (inv.notes && inv.notes.trim()) {
+    doc.fillColor(TEXT_MUTED).font('Helvetica-Bold').fontSize(9).text('NOTES', M, y);
+    doc.fillColor(TEXT_DARK).font('Helvetica').fontSize(10)
+       .text(String(inv.notes).slice(0, 800), M, y + 14, { width: tableW });
+    y += 60;
+  }
+
+  // ━━━ Footer ━━━
+  const footerY = H - 60;
+  doc.rect(0, footerY, W, 60).fill(PURPLE_LIGHT);
+  doc.fillColor(PURPLE_DARK).font('Helvetica').fontSize(9)
+     .text(inv.footer_text || 'Thank you for your business.', M, footerY + 14, { width: W - M * 2, align: 'center' });
+  doc.fillColor(TEXT_MUTED).fontSize(8)
+     .text(`Generated by FoundaPay  |  portal.foundapay.com  |  ${new Date().toISOString()}`,
+           M, footerY + 36, { width: W - M * 2, align: 'center' });
+
+  doc.end();
+}
+
+module.exports = { buildReceipt, buildStatement, buildInvoice };

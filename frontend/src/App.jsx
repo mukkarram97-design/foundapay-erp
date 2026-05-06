@@ -13,6 +13,10 @@ import Dashboard from './pages/Dashboard';
 import VirtualTerminal from './pages/VirtualTerminal';
 import Transactions from './pages/Transactions';
 import PaymentLinks from './pages/PaymentLinks';
+import Invoices from './pages/Invoices';
+import BankAccounts from './pages/BankAccounts';
+import Approvals from './pages/Approvals';
+import Remittance from './pages/Remittance';
 
 import Clients from './pages/Clients';
 import Payouts from './pages/Payouts';
@@ -86,6 +90,10 @@ export default function App() {
         <Route path="/virtual-terminal" element={<Guarded><VirtualTerminal /></Guarded>} />
         <Route path="/transactions"     element={<Guarded><Transactions /></Guarded>} />
         <Route path="/payment-links"    element={<Guarded><PaymentLinks /></Guarded>} />
+        <Route path="/invoices"         element={<Guarded><Invoices /></Guarded>} />
+        <Route path="/banks"            element={<Guarded><BankAccounts /></Guarded>} />
+        <Route path="/approvals"        element={<Guarded><Approvals /></Guarded>} />
+        <Route path="/remittance"       element={<Guarded><Remittance /></Guarded>} />
 
         <Route path="/clients"          element={<Guarded><Clients /></Guarded>} />
         <Route path="/payouts"          element={<Guarded><Payouts /></Guarded>} />

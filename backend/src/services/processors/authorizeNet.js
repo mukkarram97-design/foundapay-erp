@@ -526,6 +526,9 @@ async function generatePaymentLink(params) {
     logoUrl: params.logoUrl || null,
     returnUrl: params.returnUrl || null,
     method,
+    // Invoice bridge — only set when generated from the Invoice flow.
+    // GET /pay/:token uses this to render the detailed invoice page.
+    invoiceId: params.invoiceId || null,
     exp,
     iat: Date.now(),
   });
