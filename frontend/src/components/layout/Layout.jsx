@@ -71,6 +71,9 @@ export default function Layout({ children }) {
 
   // Counts (cards count, open chargebacks)
   const [counts, setCounts] = useState({ cards: 0, cb: 0 });
+  // Per-user permissions — used to gate sidebar items.
+  // null while loading; super_admin / owner gets allow-all from /api/permissions/me.
+  const [perms, setPerms] = useState(null);
   useEffect(() => {
     let alive = true;
     Promise.all([
@@ -83,6 +86,45 @@ export default function Layout({ children }) {
     });
     return () => { alive = false; };
   }, [location.pathname]);
+
+  // Load this user's permissions once at mount; super-admin / owner gets allow-all
+  // from the backend so the sidebar shows everything.
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/permissions/me', { headers: authHeader() })
+      .then((r) => r.json())
+      .then((p) => { if (alive) setPerms(p?.permissions || null); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [user?.id]);
+
+  // Map sidebar route → permission flag. Items not in the map are always shown.
+  const ROUTE_PERMISSION_FLAG = {
+    '/virtual-terminal': 'can_virtual_terminal',
+    '/payment-links':    'can_payment_links',
+    '/invoices':         'can_invoices',
+    '/transactions':     'can_master_ledger',
+    '/clients':          'can_clients',
+    '/payouts':          'can_payouts',
+    '/chargebacks':      'can_chargebacks',
+    '/reserves':         'can_reserves',
+    '/reconciliation':   'can_reconciliation',
+    '/banks':            'can_bank_accounts',
+    '/remittance':       'can_remittance',
+    '/approvals':        'can_approvals',
+    '/expenses':         'can_expenses',
+    '/reports':          'can_reports',
+  };
+  function itemAllowed(item) {
+    // super_admin / owner — perms object has _superAllowAll: true
+    if (perms?._superAllowAll || user?.role === 'super_admin' || user?.role === 'owner') return true;
+    // Admin (without a configured perms row) sees everything by default
+    if (user?.role === 'admin' && !perms) return true;
+    const flag = ROUTE_PERMISSION_FLAG[item.to];
+    if (!flag) return true; // unmapped routes (Dashboard, Settings, etc.) — show
+    if (!perms) return false; // perms not loaded yet — hide gated items
+    return !!perms[flag];
+  }
 
   function toggleGroup(id) {
     const next = { ...groupOpen, [id]: !isOpen(id) };
@@ -140,7 +182,7 @@ export default function Layout({ children }) {
               )}
               {(isOpen(group.id) || collapsed) && (
                 <div className="space-y-0.5 mt-0.5">
-                  {group.items.map((item) => (
+                  {group.items.filter(itemAllowed).map((item) => (
                     <NavItem key={item.to} item={item} count={counts[item.key]} collapsed={collapsed} />
                   ))}
                 </div>

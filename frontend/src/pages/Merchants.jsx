@@ -63,6 +63,17 @@ const METHODS = [
   { id: 'google', label: 'Google Pay' },
 ];
 
+// Per-processor colored badge (matches the spec color palette).
+const PROC_BADGE_TONE = {
+  authnet:      'info',     // blue
+  stripe:       'accent',   // purple
+  square:       'success',  // green
+  paymentcloud: 'warning',  // orange
+  nmi:          'neutral',
+  paypal:       'info',
+  manual:       'neutral',
+};
+
 function HealthDot({ status }) {
   const map = {
     healthy:      { icon: '🟢', label: 'Healthy', color: 'var(--success)' },
@@ -197,8 +208,11 @@ function MerchantCard({ row, isSuper, onTest, onEdit, onDelete }) {
         }
         <div className="flex-1 min-w-0">
           <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }} className="truncate">{row.processor_name}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{proc}{row.is_sandbox && ' · Sandbox'}</div>
-          {row.is_live ? <Badge tone="success" className="mt-1">Live</Badge> : <Badge tone="zinc" className="mt-1">Inactive</Badge>}
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            <Badge tone={PROC_BADGE_TONE[row.processor_type] || 'neutral'}>{proc}</Badge>
+            {row.is_sandbox && <Badge tone="warning">Sandbox</Badge>}
+            {row.is_live ? <Badge tone="success">Live</Badge> : <Badge tone="zinc">Inactive</Badge>}
+          </div>
         </div>
       </div>
 

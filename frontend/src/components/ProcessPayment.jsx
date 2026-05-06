@@ -34,6 +34,22 @@ const EXPIRY_OPTIONS = [
 function maskCard(value) {
   return value.replace(/\D/g, '').replace(/(.{4})/g, '$1 ').trim().slice(0, 23);
 }
+function procLabel(t) {
+  return ({
+    authnet: 'Authorize.net', stripe: 'Stripe', square: 'Square',
+    nmi: 'NMI', paymentcloud: 'PaymentCloud', paypal: 'PayPal', manual: 'Manual',
+  })[t] || t || 'Unknown';
+}
+function healthDot(status) {
+  return ({ healthy: '🟢', slow: '🟡', error: '🔴', unconfigured: '⚪', unknown: '⚫' })[status] || '⚫';
+}
+function dotColor(status, sandbox) {
+  if (status === 'error') return '#EF4444';
+  if (status === 'slow' || sandbox) return '#F59E0B';
+  if (status === 'healthy') return '#10B981';
+  return '#9CA3AF';
+}
+
 function maskExp(value) {
   const v = value.replace(/\D/g, '').slice(0, 4);
   if (v.length < 3) return v;
@@ -66,6 +82,8 @@ export default function ProcessPayment() {
   const [authConfig, setAuthConfig] = useState(null);
   const [authStatus, setAuthStatus] = useState(null);
   const [todayList, setTodayList] = useState([]);
+  const [merchants, setMerchants] = useState([]);
+  const [merchantId, setMerchantId] = useState('');
 
   const [form, setForm] = useState({
     amount: '',
@@ -94,24 +112,56 @@ export default function ProcessPayment() {
   const [copied, setCopied] = useState(false);
   const [linkSecondsLeft, setLinkSecondsLeft] = useState(0);
 
-  // Load lookups + Authorize.net status
+  // Load lookups + Authorize.net status + active merchants
   useEffect(() => {
     Promise.all([
       api.get('/api/clients'),
       api.get('/api/entities'),
       api.get('/api/vt/public-config'),
-    ]).then(([cl, en, cfg]) => {
+      api.get('/api/merchants?active=true').catch(() => ({ rows: [] })),
+    ]).then(([cl, en, cfg, mr]) => {
       setClients(cl.rows);
       setEntities(en.rows);
       setAuthConfig(cfg);
-      const designory = en.rows.find((e) => /designory/i.test(e.legal_name));
-      if (designory) {
-        setForm((f) => ({ ...f, entity_id: designory.id, brand_name: cfg.entity || designory.legal_name }));
+      const liveMerchants = (mr.rows || []).filter((m) => m.is_live);
+      setMerchants(liveMerchants);
+      // Pick the first live merchant by default. If only one, use it.
+      if (liveMerchants[0]) {
+        setMerchantId(liveMerchants[0].id);
+        // Auto-fill entity from merchant if it has one
+        const ent = liveMerchants[0].entity_id && en.rows.find((e) => e.id === liveMerchants[0].entity_id);
+        if (ent) {
+          setForm((f) => ({ ...f, entity_id: ent.id, brand_name: cfg.entity || ent.legal_name }));
+        } else {
+          const designory = en.rows.find((e) => /designory/i.test(e.legal_name));
+          if (designory) {
+            setForm((f) => ({ ...f, entity_id: designory.id, brand_name: cfg.entity || designory.legal_name }));
+          }
+        }
+      } else {
+        const designory = en.rows.find((e) => /designory/i.test(e.legal_name));
+        if (designory) {
+          setForm((f) => ({ ...f, entity_id: designory.id, brand_name: cfg.entity || designory.legal_name }));
+        }
       }
     }).catch(() => {});
     refreshTodayList();
     // eslint-disable-next-line
   }, []);
+
+  // When merchant changes, auto-fill entity from the merchant's linked entity.
+  const selectedMerchant = useMemo(
+    () => merchants.find((m) => m.id === merchantId) || null,
+    [merchants, merchantId]
+  );
+  useEffect(() => {
+    if (!selectedMerchant?.entity_id) return;
+    const ent = entities.find((e) => e.id === selectedMerchant.entity_id);
+    if (ent) {
+      setForm((f) => ({ ...f, entity_id: ent.id, brand_name: f.brand_name || ent.legal_name }));
+    }
+    // eslint-disable-next-line
+  }, [merchantId]);
 
   async function refreshTodayList() {
     try {
@@ -124,7 +174,28 @@ export default function ProcessPayment() {
   async function testAuthnet() {
     setAuthStatus({ loading: true });
     try {
-      const r = await api.get('/api/vt/test');
+      // If a merchant is selected, test THAT merchant (per-processor health-check
+      // service — works for any processor_type, not just authnet). Falls back to
+      // the legacy /api/vt/test for the global Authorize.net env when no merchant.
+      let r;
+      if (merchantId) {
+        const h = await api.post(`/api/merchants/${merchantId}/health-check`, {});
+        const ok = h.status === 'healthy' || h.status === 'slow';
+        r = {
+          success: ok,
+          message: ok
+            ? `${h.message || 'Connected'}${h.latency != null ? ` (${h.latency}ms)` : ''}`
+            : `${h.status}: ${h.message || 'Failed'}`,
+          status: h.status,
+          latency: h.latency,
+        };
+        // Reflect new health back on the dropdown row
+        setMerchants((arr) => arr.map((m) => m.id === merchantId
+          ? { ...m, health_status: h.status, health_message: h.message, health_checked_at: new Date().toISOString() }
+          : m));
+      } else {
+        r = await api.get('/api/vt/test');
+      }
       setAuthStatus(r);
       toast[r.success ? 'success' : 'error'](r.message);
     } catch (e) {
@@ -454,24 +525,51 @@ export default function ProcessPayment() {
             />
           </div>
 
-          {/* Authorize.net status badge */}
+          {/* Merchant selector — sits between charge-type buttons and the live banner */}
+          {merchants.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: 6 }}>
+                Merchant account
+              </div>
+              <Select value={merchantId} onChange={(e) => setMerchantId(e.target.value)}>
+                {merchants.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.processor_name} — {procLabel(m.processor_type)} {healthDot(m.health_status)}
+                  </option>
+                ))}
+              </Select>
+              {selectedMerchant?.health_status === 'error' && (
+                <div style={{ marginTop: 6, fontSize: 11, color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <AlertTriangle size={12} /> This merchant is currently unhealthy. Test before proceeding.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Live status banner — reflects selected merchant */}
           <div
             style={{
               marginTop: 14, padding: '8px 12px', borderRadius: 8,
-              background: authConfig?.sandbox ? 'var(--warning-bg)' : 'var(--success-bg)',
-              color: authConfig?.sandbox ? 'var(--warning-fg)' : 'var(--success-fg)',
+              background: selectedMerchant?.is_sandbox || (!selectedMerchant && authConfig?.sandbox) ? 'var(--warning-bg)' : 'var(--success-bg)',
+              color: selectedMerchant?.is_sandbox || (!selectedMerchant && authConfig?.sandbox) ? 'var(--warning-fg)' : 'var(--success-fg)',
               fontSize: 12,
               display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
             }}
           >
             <span style={{
               width: 8, height: 8, borderRadius: '50%',
-              background: authConfig?.sandbox ? '#F59E0B' : '#10B981',
+              background: dotColor(selectedMerchant?.health_status, selectedMerchant?.is_sandbox || authConfig?.sandbox),
               boxShadow: '0 0 0 3px rgba(255,255,255,0.15)',
             }} />
             <span>
-              <strong>Authorize.net {authConfig?.sandbox ? 'SANDBOX' : 'LIVE'}</strong>
-              {authConfig?.entity && <> — {authConfig.entity}</>}
+              <strong>
+                {selectedMerchant
+                  ? `${procLabel(selectedMerchant.processor_type)} ${selectedMerchant.is_sandbox ? 'SANDBOX' : 'LIVE'}`
+                  : `Authorize.net ${authConfig?.sandbox ? 'SANDBOX' : 'LIVE'}`}
+              </strong>
+              {selectedMerchant
+                ? ` — ${selectedMerchant.processor_name}`
+                : (authConfig?.entity && ` — ${authConfig.entity}`)}
             </span>
             <span style={{ flex: 1 }} />
             <button
@@ -486,6 +584,11 @@ export default function ProcessPayment() {
               {authStatus?.loading ? 'Testing…' : 'Test connection'}
             </button>
           </div>
+          {authStatus && !authStatus.loading && (
+            <div style={{ marginTop: 8, fontSize: 11, color: authStatus.success ? 'var(--success)' : 'var(--danger)' }}>
+              {authStatus.success ? '✅ ' : '❌ '}{authStatus.message}
+            </div>
+          )}
         </Card>
 
         {/* Amount + invoice + description (Direct Charge / Payment Link only) */}

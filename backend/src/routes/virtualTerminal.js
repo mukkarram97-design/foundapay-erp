@@ -34,7 +34,7 @@ router.post('/charge', async (req, res) => {
       return res.status(400).json({ error: 'Amount, card.number, card.expiry, card.cvv required' });
     }
 
-    // Client-user limits
+    // Client-user limits (legacy — preserved)
     if (req.user.role === 'client_user') {
       const acc = await c.query(
         'SELECT * FROM client_terminal_access WHERE client_id = $1',
@@ -46,6 +46,38 @@ router.post('/charge', async (req, res) => {
       }
       if (ac.per_transaction_limit && parseFloat(b.amount) > parseFloat(ac.per_transaction_limit)) {
         return res.status(400).json({ error: `Transaction limit is $${ac.per_transaction_limit}` });
+      }
+    }
+
+    // Per-user permission gate (super_admin / owner bypass automatically).
+    {
+      const { getUserPermissions, getCurrentUsage, checkVtAllowed } = require('../services/permissions');
+      const perms = await getUserPermissions(req.user.id, req.user.role);
+      if (!perms?._superAllowAll) {
+        const usage = await getCurrentUsage(req.user.id, perms);
+        const verdict = await checkVtAllowed({
+          perms, kind: 'direct',
+          amount: parseFloat(b.amount),
+          merchantId: b.merchant_id || null,
+          usage,
+        });
+        if (!verdict.allowed) {
+          if (verdict.action === 'require_approval') {
+            await c.query(`
+              INSERT INTO approval_requests (type, status, reference_type, amount, currency,
+                                             requested_by, request_reason)
+              VALUES ('refund_request','pending','transaction',$1,'USD',$2,$3)
+            `, [parseFloat(b.amount), req.user.id, `Auto-submitted: ${verdict.reason}`]);
+            return res.status(202).json({ submitted_for_approval: true, message: verdict.reason });
+          }
+          if (verdict.action === 'warn') {
+            // Allow but flag — frontend should show a warning toast
+            // (we tag the response so the caller can surface it).
+            res.locals.limitWarning = verdict.reason;
+          } else {
+            return res.status(403).json({ error: verdict.reason });
+          }
+        }
       }
     }
 
@@ -211,6 +243,30 @@ router.post('/generate-link', async (req, res) => {
       b.client_id = req.user.client_id;
       if (ac.entity_id) b.entity_id = ac.entity_id;
       if (ac.merchant_id) b.merchant_id = ac.merchant_id;
+    }
+
+    // Per-user permission gate
+    {
+      const { getUserPermissions, getCurrentUsage, checkVtAllowed } = require('../services/permissions');
+      const perms = await getUserPermissions(req.user.id, req.user.role);
+      if (!perms?._superAllowAll) {
+        const usage = await getCurrentUsage(req.user.id, perms);
+        const verdict = await checkVtAllowed({
+          perms,
+          kind: b.invoice_id ? 'invoice' : 'link',
+          amount: parseFloat(b.amount),
+          merchantId: b.merchant_id || null,
+          usage,
+        });
+        if (!verdict.allowed) {
+          if (verdict.action === 'require_approval') {
+            return res.status(202).json({ submitted_for_approval: true, message: verdict.reason });
+          }
+          if (verdict.action !== 'warn') {
+            return res.status(403).json({ error: verdict.reason });
+          }
+        }
+      }
     }
 
     // Resolve logo from entity > client (entity takes priority since it's the

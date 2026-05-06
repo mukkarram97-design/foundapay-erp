@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   MoreVertical, Edit2, Mail, UserX, UserCheck, Trash2, Plus, Search, AlertTriangle, X,
+  Settings as SettingsIcon, ShieldCheck,
 } from 'lucide-react';
 import { api } from '../utils/api';
 import {
@@ -28,6 +29,7 @@ export default function Users() {
   const [edit, setEdit] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
   const [tempPass, setTempPass] = useState(null);
+  const [permsFor, setPermsFor] = useState(null); // user being configured
   const [err, setErr] = useState(null);
 
   async function load() {
@@ -123,6 +125,7 @@ export default function Users() {
                 onEdit={() => setEdit(u)}
                 onDelete={() => setConfirmDel(u)}
                 onTempPass={(p) => setTempPass({ email: u.email, password: p })}
+                onConfigurePermissions={() => setPermsFor(u)}
                 onChange={load}
               />
             ))}
@@ -149,12 +152,20 @@ export default function Users() {
           onDeleted={() => { setConfirmDel(null); load(); }}
         />
       )}
+
+      {permsFor && (
+        <PermissionsSlideOver
+          user={permsFor}
+          onClose={() => setPermsFor(null)}
+          onSaved={() => { setPermsFor(null); load(); }}
+        />
+      )}
     </div>
   );
 }
 
 // ━━━ Single row with kebab menu + status pill ─────────────
-function UserRow({ u, me, isSuperAdmin, isAdminOrSuper, onEdit, onDelete, onTempPass, onChange }) {
+function UserRow({ u, me, isSuperAdmin, isAdminOrSuper, onEdit, onDelete, onTempPass, onConfigurePermissions, onChange }) {
   const isSelf = u.id === me?.id;
   const isTargetSuper = u.role === 'super_admin';
   const inactive = !u.is_active;
@@ -189,9 +200,11 @@ function UserRow({ u, me, isSuperAdmin, isAdminOrSuper, onEdit, onDelete, onTemp
           isSelf={isSelf}
           canToggle={canToggle}
           canDelete={canDelete}
+          isAdminOrSuper={isAdminOrSuper}
           onEdit={onEdit}
           onDelete={onDelete}
           onTempPass={onTempPass}
+          onConfigurePermissions={onConfigurePermissions}
           onChange={onChange}
         />
       </Td>
@@ -347,7 +360,7 @@ const MENU_WIDTH = 220;
 const MENU_GAP = 6;
 const VIEWPORT_PADDING = 12;
 
-function KebabMenu({ u, isSelf, canToggle, canDelete, onEdit, onDelete, onTempPass, onChange }) {
+function KebabMenu({ u, isSelf, canToggle, canDelete, isAdminOrSuper, onEdit, onDelete, onTempPass, onConfigurePermissions, onChange }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(null);
   const [pos, setPos] = useState(null);
@@ -470,6 +483,11 @@ function KebabMenu({ u, isSelf, canToggle, canDelete, onEdit, onDelete, onTempPa
           <MenuItem icon={Edit2} onClick={() => { setOpen(false); onEdit(); }}>
             Edit user
           </MenuItem>
+          {isAdminOrSuper && u.role !== 'super_admin' && (
+            <MenuItem icon={SettingsIcon} onClick={() => { setOpen(false); onConfigurePermissions(); }}>
+              Configure permissions
+            </MenuItem>
+          )}
           {!isSelf && (
             <MenuItem icon={Mail} onClick={resendInvite} disabled={!u.is_active}>
               Resend invite
@@ -710,5 +728,301 @@ function UserForm({ user, clients, onClose, onSaved }) {
         {!user && <div className="col-span-2 text-xs" style={{ color: 'var(--text-tertiary)' }}>A temporary password will be generated and emailed.</div>}
       </div>
     </Modal>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Configure-permissions slide-over (admin / super-admin only)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const MODULE_GROUPS = [
+  {
+    label: 'Operations',
+    items: [
+      ['can_virtual_terminal', 'Virtual Terminal'],
+      ['can_payment_links',    'Payment Requests'],
+      ['can_invoices',         'Invoices'],
+      ['can_approvals',        'Approvals'],
+      ['can_remittance',       'Remittance'],
+      ['can_master_ledger',    'Master Ledger'],
+    ],
+  },
+  {
+    label: 'Finance',
+    items: [
+      ['can_clients',          'Clients (view)'],
+      ['can_payouts',          'Payouts'],
+      ['can_chargebacks',      'Chargebacks (view)'],
+      ['can_reserves',         'Reserves (view)'],
+      ['can_reconciliation',   'Reconciliation'],
+      ['can_bank_accounts',    'Bank Accounts'],
+    ],
+  },
+  {
+    label: 'Reporting',
+    items: [
+      ['can_reports',          'Reports'],
+      ['can_expenses',         'Expenses'],
+    ],
+  },
+];
+
+function PermissionsSlideOver({ user, onClose, onSaved }) {
+  const [data, setData] = useState(null);
+  const [merchants, setMerchants] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    Promise.all([
+      api.get(`/api/permissions/${user.id}`),
+      api.get('/api/merchants?active=true').catch(() => ({ rows: [] })),
+    ]).then(([p, m]) => {
+      setData(p);
+      setMerchants(m.rows || []);
+    }).catch((e) => setErr(e.message));
+  }, [user.id]);
+
+  if (err) {
+    return (
+      <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1100, display: 'flex', justifyContent: 'flex-end' }}>
+        <div className="fp-card" style={{ width: 500, height: '100vh', padding: 24 }}>
+          <Alert tone="error">{err}</Alert>
+          <Button variant="ghost" onClick={onClose} className="mt-3">Close</Button>
+        </div>
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  const perms = data.permissions || {};
+  const usage = data.usage || {};
+
+  // Local form state mirrors the server row
+  const [form, setForm] = [data.permissions || defaultPermsForm(user), null]; // not used directly; we mutate via setData
+  return (
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)', zIndex: 1100, display: 'flex', justifyContent: 'flex-end' }}>
+      <div className="fp-card" style={{ width: '100%', maxWidth: 800, height: '100vh', overflowY: 'auto', borderRadius: 0, padding: 0 }}>
+        <PermissionsForm
+          user={user}
+          merchants={merchants}
+          initial={data.permissions || defaultPermsForm(user)}
+          usage={usage}
+          busy={busy}
+          onSave={async (next) => {
+            setBusy(true); setErr(null);
+            try {
+              await api.post(`/api/permissions/${user.id}`, next);
+              toast.success(`Permissions updated for ${user.name || user.email}`);
+              onSaved();
+            } catch (e) { setErr(e.message); toast.error(e.message); }
+            finally { setBusy(false); }
+          }}
+          onClose={onClose}
+        />
+      </div>
+    </div>
+  );
+}
+
+function defaultPermsForm(user) {
+  return {
+    can_virtual_terminal: false, can_payment_links: false, can_invoices: false,
+    can_master_ledger: false, can_reports: false, can_payouts: false,
+    can_reconciliation: false, can_bank_accounts: false, can_remittance: false,
+    can_clients: false, can_chargebacks: false, can_reserves: false,
+    can_expenses: false, can_approvals: false,
+    vt_direct_charge: false, vt_payment_links: false, vt_invoices: false,
+    vt_merchants: [],
+    vt_limit_per_transaction: 0, vt_limit_daily: 0, vt_limit_monthly: 0,
+    vt_max_links_per_day: 0, vt_max_links_per_month: 0,
+    vt_link_max_amount: 0, vt_link_auto_expire_hours: 24,
+    limit_action: 'block', limit_reset_type: 'monthly_first',
+    see_own_data_only: user.role === 'client_user',
+    show_usage_to_user: true,
+    client_id: user.client_id || null,
+  };
+}
+
+function PermissionsForm({ user, merchants, initial, usage, busy, onSave, onClose }) {
+  const [f, setF] = useState(() => ({ ...initial, vt_merchants: Array.isArray(initial.vt_merchants) ? initial.vt_merchants : [] }));
+  const setField = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const toggleMerchant = (id) => setF((s) => ({
+    ...s,
+    vt_merchants: s.vt_merchants.includes(id) ? s.vt_merchants.filter((x) => x !== id) : [...s.vt_merchants, id],
+  }));
+
+  return (
+    <>
+      <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ width: 36, height: 36, borderRadius: '50%', background: 'var(--accent-dim)', color: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <ShieldCheck size={18} />
+        </span>
+        <div style={{ flex: 1 }}>
+          <h3 style={{ fontSize: 16, fontWeight: 600 }}>Permissions — {user.name || user.email}</h3>
+          <div className="flex items-center gap-2 mt-1">
+            <Badge tone={user.role.includes('admin') ? 'accent' : 'info'}>{user.role}</Badge>
+            {user.client_name && <Badge tone="neutral">{user.client_name}</Badge>}
+          </div>
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)' }}><X size={18} /></button>
+      </div>
+
+      <div style={{ padding: 24 }}>
+        {/* Module access */}
+        <Section title="Module access">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {MODULE_GROUPS.map((g) => (
+              <div key={g.label}>
+                <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 6 }}>{g.label}</div>
+                {g.items.map(([key, label]) => (
+                  <Toggle key={key} checked={!!f[key]} onChange={(v) => setField(key, v)}>{label}</Toggle>
+                ))}
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        {/* VT settings — only visible if VT module is on */}
+        {f.can_virtual_terminal && (
+          <>
+            <Section title="Virtual Terminal — charge types">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <Toggle checked={!!f.vt_direct_charge} onChange={(v) => setField('vt_direct_charge', v)}>Direct Charge</Toggle>
+                <Toggle checked={!!f.vt_payment_links} onChange={(v) => setField('vt_payment_links', v)}>Payment Link</Toggle>
+                <Toggle checked={!!f.vt_invoices} onChange={(v) => setField('vt_invoices', v)}>Generate Invoice</Toggle>
+              </div>
+            </Section>
+
+            <Section title="Allowed merchants">
+              {merchants.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>No live merchants yet — go to /merchants to add one.</div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+                  {merchants.map((m) => (
+                    <label key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', cursor: 'pointer', fontSize: 13 }}>
+                      <input type="checkbox" checked={f.vt_merchants.includes(m.id)} onChange={() => toggleMerchant(m.id)} />
+                      <span>{m.processor_name} <span style={{ color: 'var(--text-tertiary)' }}>— {m.processor_type}</span> {m.health_status === 'healthy' ? '🟢' : m.health_status === 'error' ? '🔴' : '⚪'}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </Section>
+
+            <Section title="Limits">
+              <div className="grid grid-cols-2 gap-3">
+                <NumberField label="Per transaction ($, 0 = unlimited)" value={f.vt_limit_per_transaction} onChange={(v) => setField('vt_limit_per_transaction', v)} />
+                <NumberField label="Daily total ($)" value={f.vt_limit_daily} onChange={(v) => setField('vt_limit_daily', v)} />
+                <NumberField label="Monthly total ($)" value={f.vt_limit_monthly} onChange={(v) => setField('vt_limit_monthly', v)} />
+                <NumberField label="Links per day" value={f.vt_max_links_per_day} onChange={(v) => setField('vt_max_links_per_day', v)} />
+                <NumberField label="Links per month" value={f.vt_max_links_per_month} onChange={(v) => setField('vt_max_links_per_month', v)} />
+                <NumberField label="Max link amount ($)" value={f.vt_link_max_amount} onChange={(v) => setField('vt_link_max_amount', v)} />
+                <NumberField label="Link auto-expire (hours)" value={f.vt_link_auto_expire_hours} onChange={(v) => setField('vt_link_auto_expire_hours', v)} />
+              </div>
+              <div className="mt-3"><Label>When limit is hit</Label>
+                <Select value={f.limit_action} onChange={(e) => setField('limit_action', e.target.value)}>
+                  <option value="block">Block completely</option>
+                  <option value="warn">Show warning but allow</option>
+                  <option value="require_approval">Require approval to exceed</option>
+                </Select>
+              </div>
+              <div className="mt-3"><Label>Limit reset</Label>
+                <Select value={f.limit_reset_type} onChange={(e) => setField('limit_reset_type', e.target.value)}>
+                  <option value="monthly_first">Monthly on the 1st</option>
+                  <option value="rolling_30">Rolling 30 days</option>
+                </Select>
+              </div>
+            </Section>
+          </>
+        )}
+
+        <Section title="Data visibility">
+          <Toggle checked={!!f.see_own_data_only} onChange={(v) => setField('see_own_data_only', v)}>
+            See only their own client's data <span style={{ color: 'var(--text-tertiary)' }}>(recommended for clients)</span>
+          </Toggle>
+          <Toggle checked={!!f.show_usage_to_user} onChange={(v) => setField('show_usage_to_user', v)}>
+            Show usage stats to this user
+          </Toggle>
+        </Section>
+
+        <Section title="Current usage (read-only)">
+          <UsageStrip usage={usage} limits={f} />
+        </Section>
+      </div>
+
+      <div style={{ position: 'sticky', bottom: 0, background: 'var(--bg-secondary)', borderTop: '1px solid var(--border)', padding: '12px 24px', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button disabled={busy} onClick={() => onSave(f)}>{busy ? 'Saving…' : 'Save Permissions'}</Button>
+      </div>
+    </>
+  );
+}
+
+function Toggle({ checked, onChange, children }) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)' }}>
+      <input type="checkbox" checked={!!checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>{children}</span>
+    </label>
+  );
+}
+
+function NumberField({ label, value, onChange }) {
+  return (
+    <div>
+      <Label>{label}</Label>
+      <Input type="number" step="0.01" value={value ?? 0} onChange={(e) => onChange(parseFloat(e.target.value) || 0)} />
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14, marginTop: 14 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: 10 }}>
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function UsageStrip({ usage, limits }) {
+  const monthly = parseFloat(limits?.vt_limit_monthly) || 0;
+  const daily   = parseFloat(limits?.vt_limit_daily)   || 0;
+  const monthlyUsed = parseFloat(usage?.charged?.this_period) || 0;
+  const dailyUsed   = parseFloat(usage?.charged?.today)       || 0;
+  const monthlyPct = monthly > 0 ? Math.min(100, Math.round((monthlyUsed / monthly) * 100)) : 0;
+  const dailyPct   = daily   > 0 ? Math.min(100, Math.round((dailyUsed   / daily)   * 100)) : 0;
+
+  return (
+    <div style={{ fontSize: 13 }}>
+      <div style={{ marginBottom: 10 }}>
+        Period: <strong>{usage?.period?.start} → {usage?.period?.end}</strong>
+      </div>
+      <Bar label={`Monthly: $${monthlyUsed.toFixed(2)} / ${monthly > 0 ? `$${monthly.toFixed(2)}` : '∞'}`} pct={monthlyPct} />
+      <Bar label={`Daily: $${dailyUsed.toFixed(2)} / ${daily > 0 ? `$${daily.toFixed(2)}` : '∞'}`} pct={dailyPct} />
+      <div style={{ marginTop: 8, color: 'var(--text-secondary)' }}>
+        Links: <strong>{usage?.links?.this_period ?? 0}</strong> this period · <strong>{usage?.links?.today ?? 0}</strong> today
+      </div>
+    </div>
+  );
+}
+
+function Bar({ label, pct }) {
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+        <span>{label}</span><span>{pct}%</span>
+      </div>
+      <div style={{ height: 6, background: 'var(--bg-tertiary)', borderRadius: 999, marginTop: 4, overflow: 'hidden' }}>
+        <div style={{
+          width: `${pct}%`, height: '100%',
+          background: pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warning)' : 'var(--accent)',
+          transition: 'width 200ms',
+        }} />
+      </div>
+    </div>
   );
 }
