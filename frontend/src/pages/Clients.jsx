@@ -30,6 +30,7 @@ export default function Clients() {
   const [cards, setCards] = useState([]);
   const [editClient, setEditClient] = useState(null);
   const [visClient, setVisClient] = useState(null);
+  const [rateHistoryClient, setRateHistoryClient] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -85,6 +86,7 @@ export default function Clients() {
                   <div className="flex gap-2 text-xs">
                     <button className="text-[var(--accent)] hover:opacity-80" onClick={() => setEditClient(c)}>Edit</button>
                     <button className="text-[var(--accent)] hover:opacity-80" onClick={() => setVisClient(c)}>Visibility</button>
+                    <button className="text-[var(--accent)] hover:opacity-80" onClick={() => setRateHistoryClient(c)}>Rates</button>
                   </div>
                 </Td>
               </Tr>
@@ -96,6 +98,7 @@ export default function Clients() {
       {createOpen && <ClientForm onClose={() => setCreateOpen(false)} onSaved={() => { setCreateOpen(false); load(); }} />}
       {editClient && <ClientForm client={editClient} onClose={() => setEditClient(null)} onSaved={() => { setEditClient(null); load(); }} />}
       {visClient && <VisibilityModal client={visClient} cards={cards} onClose={() => setVisClient(null)} onSaved={() => { setVisClient(null); load(); }} />}
+      {rateHistoryClient && <RateHistoryModal client={rateHistoryClient} onClose={() => setRateHistoryClient(null)} onSaved={load} />}
     </div>
   );
 }
@@ -308,6 +311,161 @@ function BrandingSection({ client, onChanged }) {
       </div>
       <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 8 }}>
         PNG, JPG, WebP, or SVG. Max 1 MB. Recommended ~400×100px.
+      </div>
+    </Card>
+  );
+}
+
+// ━━━ Rate history modal ━━━
+function RateHistoryModal({ client, onClose, onSaved }) {
+  const [rows, setRows] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [changing, setChanging] = React.useState(false);
+  const { user } = (() => {
+    try { const u = JSON.parse(localStorage.getItem('foundapay_user') || 'null'); return { user: u }; }
+    catch { return { user: null }; }
+  })();
+  const isSuperAdmin = user?.role === 'super_admin';
+
+  async function load() {
+    setLoading(true);
+    try {
+      const r = await api.get(`/api/clients/${client.id}/rate-history`);
+      setRows(r.rows);
+    } catch (e) { toast.error(e.message); }
+    finally { setLoading(false); }
+  }
+  React.useEffect(() => { load(); }, [client.id]);
+
+  return (
+    <Modal open onClose={onClose} title={`Rate history — ${client.name}`} wide
+      footer={<Button onClick={onClose}>Close</Button>}>
+      <div className="mb-4">
+        <Card className="p-3" style={{ background: 'var(--bg-tertiary)' }}>
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Current rates (live)</div>
+          <div className="grid grid-cols-5 gap-2 mt-2 text-sm">
+            <div>Card: <strong>{((client.card_pct || 0) * 100).toFixed(2)}%</strong></div>
+            <div>Wire: <strong>{((client.wire_pct || 0) * 100).toFixed(2)}%</strong></div>
+            <div>ACH: <strong>{((client.ach_pct || 0) * 100).toFixed(2)}%</strong></div>
+            <div>Zelle: <strong>{((client.zelle_pct || 0) * 100).toFixed(2)}%</strong></div>
+            <div>Cheque: <strong>{((client.cheque_pct || 0) * 100).toFixed(2)}%</strong></div>
+          </div>
+        </Card>
+      </div>
+
+      {isSuperAdmin && !changing && (
+        <div className="mb-4">
+          <Button onClick={() => setChanging(true)}>+ Change rates</Button>
+        </div>
+      )}
+
+      {changing && (
+        <ChangeRatesForm client={client} onCancel={() => setChanging(false)}
+          onSaved={() => { setChanging(false); load(); onSaved?.(); }} />
+      )}
+
+      <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+        Timeline ({rows.length} {rows.length === 1 ? 'change' : 'changes'})
+      </div>
+
+      {loading && <div style={{ color: 'var(--text-secondary)' }}>Loading…</div>}
+      {!loading && rows.length === 0 && (
+        <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+          No rate-history records yet. Existing transactions used the rates baked in at write-time.
+        </div>
+      )}
+      {rows.map((r) => (
+        <Card key={r.id} className="p-3 mb-2">
+          <div className="flex justify-between items-start mb-2">
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                Effective {r.effective_from}
+                {r.effective_to ? ` → ${r.effective_to}` : ' → ongoing'}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                Changed by {r.changed_by_name || 'unknown'} at {new Date(r.created_at).toLocaleString()}
+              </div>
+            </div>
+            <Badge tone={r.effective_to ? 'neutral' : 'success'}>
+              {r.effective_to ? 'historical' : 'current'}
+            </Badge>
+          </div>
+          <div className="grid grid-cols-5 gap-2 text-sm" style={{ marginTop: 6 }}>
+            <div>Card: <strong>{r.card_pct != null ? (r.card_pct * 100).toFixed(2) + '%' : '—'}</strong></div>
+            <div>Wire: <strong>{r.wire_pct != null ? (r.wire_pct * 100).toFixed(2) + '%' : '—'}</strong></div>
+            <div>ACH: <strong>{r.ach_pct != null ? (r.ach_pct * 100).toFixed(2) + '%' : '—'}</strong></div>
+            <div>Zelle: <strong>{r.zelle_pct != null ? (r.zelle_pct * 100).toFixed(2) + '%' : '—'}</strong></div>
+            <div>Cheque: <strong>{r.cheque_pct != null ? (r.cheque_pct * 100).toFixed(2) + '%' : '—'}</strong></div>
+          </div>
+          {r.change_reason && (
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 8, padding: 8, background: 'var(--bg-tertiary)', borderRadius: 6 }}>
+              <em>"{r.change_reason}"</em>
+            </div>
+          )}
+        </Card>
+      ))}
+    </Modal>
+  );
+}
+
+function ChangeRatesForm({ client, onCancel, onSaved }) {
+  const [form, setForm] = React.useState({
+    effective_from: new Date().toISOString().slice(0, 10),
+    change_reason: '',
+    card_pct: ((client.card_pct || 0) * 100).toFixed(2),
+    wire_pct: ((client.wire_pct || 0) * 100).toFixed(2),
+    ach_pct: ((client.ach_pct || 0) * 100).toFixed(2),
+    zelle_pct: ((client.zelle_pct || 0) * 100).toFixed(2),
+    cheque_pct: ((client.cheque_pct || 0) * 100).toFixed(2),
+  });
+  const [busy, setBusy] = React.useState(false);
+
+  async function save() {
+    if (!form.change_reason.trim()) return toast.error('Reason is required');
+    setBusy(true);
+    try {
+      await api.post(`/api/clients/${client.id}/rate-history`, {
+        effective_from: form.effective_from,
+        change_reason: form.change_reason,
+        card_pct: parseFloat(form.card_pct) / 100,
+        wire_pct: parseFloat(form.wire_pct) / 100,
+        ach_pct: parseFloat(form.ach_pct) / 100,
+        zelle_pct: parseFloat(form.zelle_pct) / 100,
+        cheque_pct: parseFloat(form.cheque_pct) / 100,
+      });
+      toast.success('Rate change saved');
+      onSaved();
+    } catch (e) { toast.error(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Card className="p-4 mb-4" style={{ borderLeft: '3px solid var(--accent)' }}>
+      <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>New rate change</div>
+      <Alert tone="warning" className="my-3">
+        Existing transactions keep their recorded rate. Only new transactions from <strong>{form.effective_from}</strong> onwards will use these rates.
+      </Alert>
+      <div className="grid grid-cols-2 gap-3 mt-3">
+        <div>
+          <Label>Effective from</Label>
+          <Input type="date" value={form.effective_from}
+            onChange={(e) => setForm((f) => ({ ...f, effective_from: e.target.value }))} />
+        </div>
+        <div>
+          <Label>Reason (required)</Label>
+          <Input value={form.change_reason}
+            onChange={(e) => setForm((f) => ({ ...f, change_reason: e.target.value }))}
+            placeholder="e.g. Promotional rate ended, contract renegotiation" />
+        </div>
+        <div><Label>Card %</Label><Input type="number" step="0.01" value={form.card_pct} onChange={(e) => setForm((f) => ({ ...f, card_pct: e.target.value }))} /></div>
+        <div><Label>Wire %</Label><Input type="number" step="0.01" value={form.wire_pct} onChange={(e) => setForm((f) => ({ ...f, wire_pct: e.target.value }))} /></div>
+        <div><Label>ACH %</Label><Input type="number" step="0.01" value={form.ach_pct} onChange={(e) => setForm((f) => ({ ...f, ach_pct: e.target.value }))} /></div>
+        <div><Label>Zelle %</Label><Input type="number" step="0.01" value={form.zelle_pct} onChange={(e) => setForm((f) => ({ ...f, zelle_pct: e.target.value }))} /></div>
+        <div><Label>Cheque %</Label><Input type="number" step="0.01" value={form.cheque_pct} onChange={(e) => setForm((f) => ({ ...f, cheque_pct: e.target.value }))} /></div>
+      </div>
+      <div className="flex gap-2 mt-4">
+        <Button onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save new rate'}</Button>
+        <Button variant="ghost" onClick={onCancel}>Cancel</Button>
       </div>
     </Card>
   );

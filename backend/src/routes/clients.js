@@ -325,6 +325,124 @@ router.post('/:id/assign-card', blockClientUser, async (req, res) => {
   }
 });
 
+// ━━━ Rate history ━━━
+// GET /api/clients/:id/rate-history — full history sorted by effective_from desc
+router.get('/:id/rate-history', blockClientUser, async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT crh.*, u.name AS changed_by_name
+        FROM client_rate_history crh
+        LEFT JOIN users u ON u.id = crh.changed_by
+       WHERE crh.client_id = $1
+       ORDER BY crh.effective_from DESC, crh.created_at DESC
+    `, [req.params.id]);
+    res.json({ rows: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/clients/:id/rate-history — record a new rate change (super_admin only)
+router.post('/:id/rate-history', async (req, res) => {
+  if (req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Only super_admin can change rates' });
+  }
+  const c = await pool.connect();
+  try {
+    const b = req.body || {};
+    if (!b.effective_from) return res.status(400).json({ error: 'effective_from required' });
+    if (!b.change_reason || !b.change_reason.trim()) {
+      return res.status(400).json({ error: 'change_reason required' });
+    }
+
+    await c.query('BEGIN');
+
+    // Close out the previous open record (effective_to = effective_from - 1 day)
+    await c.query(`
+      UPDATE client_rate_history
+         SET effective_to = ($1::date - INTERVAL '1 day')::date
+       WHERE client_id = $2 AND effective_to IS NULL
+    `, [b.effective_from, req.params.id]);
+
+    // Insert the new rate record
+    const r = await c.query(`
+      INSERT INTO client_rate_history
+        (client_id, effective_from, card_pct, wire_pct, ach_pct, zelle_pct, cheque_pct,
+         changed_by, change_reason)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      RETURNING *
+    `, [
+      req.params.id, b.effective_from,
+      b.card_pct ?? null, b.wire_pct ?? null, b.ach_pct ?? null,
+      b.zelle_pct ?? null, b.cheque_pct ?? null,
+      req.user.id, b.change_reason.trim(),
+    ]);
+
+    // Update the live clients row to match the new rate (transactions store their
+    // applied rate at write-time, so historical accuracy is preserved)
+    await c.query(`
+      UPDATE clients
+         SET card_pct   = COALESCE($1, card_pct),
+             wire_pct   = COALESCE($2, wire_pct),
+             ach_pct    = COALESCE($3, ach_pct),
+             zelle_pct  = COALESCE($4, zelle_pct),
+             cheque_pct = COALESCE($5, cheque_pct),
+             updated_at = NOW()
+       WHERE id = $6
+    `, [b.card_pct, b.wire_pct, b.ach_pct, b.zelle_pct, b.cheque_pct, req.params.id]);
+
+    await c.query('COMMIT');
+
+    await logAudit({
+      action: 'client.rate_changed',
+      entityType: 'clients',
+      entityId: req.params.id,
+      userId: req.user.id,
+      metadata: {
+        effective_from: b.effective_from,
+        rates: { card: b.card_pct, wire: b.wire_pct, ach: b.ach_pct, zelle: b.zelle_pct, cheque: b.cheque_pct },
+        reason: b.change_reason,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json(r.rows[0]);
+  } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
+    res.status(500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// GET /api/clients/:id/rate-at-date?date=YYYY-MM-DD — rate active on a given date
+router.get('/:id/rate-at-date', blockClientUser, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const r = await pool.query(`
+      SELECT card_pct, wire_pct, ach_pct, zelle_pct, cheque_pct, effective_from, effective_to
+        FROM client_rate_history
+       WHERE client_id = $1
+         AND effective_from <= $2::date
+         AND (effective_to IS NULL OR effective_to >= $2::date)
+       ORDER BY effective_from DESC
+       LIMIT 1
+    `, [req.params.id, date]);
+    if (!r.rows[0]) {
+      // Fall back to the live clients row if no history exists yet
+      const c = await pool.query(
+        'SELECT card_pct, wire_pct, ach_pct, zelle_pct, cheque_pct FROM clients WHERE id = $1',
+        [req.params.id]
+      );
+      return res.json({ rate: c.rows[0] || null, source: 'clients_table_live' });
+    }
+    res.json({ rate: r.rows[0], source: 'rate_history' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.delete('/:id/cards/:cardId', blockClientUser, async (req, res) => {
   try {
     await pool.query(
