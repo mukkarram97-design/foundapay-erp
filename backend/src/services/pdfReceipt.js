@@ -51,10 +51,11 @@ function drawPaidStamp(doc, { x = 380, y = 140 } = {}) {
 }
 
 const STATUS_COLORS = {
-  Completed: { bg: '#D1FAE5', fg: '#065F46', label: 'COMPLETED ✓' },
+  Completed: { bg: '#D1FAE5', fg: '#065F46', label: 'PAID' },
   Hold: { bg: '#FEF3C7', fg: '#92400E', label: 'ON HOLD ⚠' },
   'Charge Back': { bg: '#FEE2E2', fg: '#991B1B', label: 'CHARGEBACK ✗' },
   Processing: { bg: '#DBEAFE', fg: '#1E40AF', label: 'PROCESSING' },
+  Failed: { bg: '#FEE2E2', fg: '#991B1B', label: 'FAILED' },
 };
 
 function fmtMoney(n) {
