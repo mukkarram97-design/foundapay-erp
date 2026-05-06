@@ -85,6 +85,32 @@ router.get('/me', async (req, res) => {
       WHERE client_id = $1 ORDER BY created_at DESC
     `, [cid])).rows : [];
 
+    // Payment links + invoices for this client (used by the portal Home / Invoices /
+    // Payment Requests tabs). Filtered by client_id at the DB level.
+    const paymentLinks = await pool.query(`
+      SELECT plr.id, plr.token, plr.status, plr.amount, plr.currency, plr.description,
+             plr.customer_name, plr.customer_email, plr.created_at, plr.expires_at,
+             plr.paid_at, plr.invoice_number, plr.transaction_id,
+             plr.view_count, plr.viewed_at,
+             (SELECT COUNT(*)::int FROM audit_logs
+                WHERE action = 'payment_link.copied' AND resource_id = plr.id::text) AS copy_count
+        FROM payment_link_requests plr
+       WHERE plr.client_id = $1
+       ORDER BY plr.created_at DESC
+       LIMIT 100
+    `, [cid]);
+
+    const invoices = await pool.query(`
+      SELECT i.id, i.invoice_number, i.customer_name, i.customer_email,
+             i.issue_date, i.due_date,
+             i.subtotal, i.tax_rate, i.tax_amount, i.discount_amount, i.total_amount, i.currency,
+             i.status, i.paid_at, i.transaction_id, i.created_at
+        FROM invoices i
+       WHERE i.client_id = $1 AND i.is_deleted = false
+       ORDER BY i.created_at DESC
+       LIMIT 100
+    `, [cid]);
+
     const c = cl.rows[0];
     res.json({
       client: {
@@ -103,6 +129,8 @@ router.get('/me', async (req, res) => {
       payouts: vis.show_payout_status ? payouts.rows : [],
       reserves,
       chargebacks,
+      payment_links: paymentLinks.rows,
+      invoices: invoices.rows,
     });
   } catch (err) {
     console.error('[portal/me]', err);

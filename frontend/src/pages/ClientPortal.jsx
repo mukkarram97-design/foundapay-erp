@@ -11,15 +11,19 @@ import ThemeToggle from '../components/ui/ThemeToggle';
 import { toast } from '../store/toast';
 import { downloadReceipt, downloadStatement } from '../utils/downloadReceipt';
 
-const BASE_TABS = [
-  { id: 'home',          label: '🏠 Home' },
-  { id: 'transactions',  label: 'Transactions' },
-  { id: 'payment_links', label: 'Payment Links' },
-  { id: 'reserves',      label: 'Reserves' },
-  { id: 'payouts',       label: 'Payouts' },
-  { id: 'chargebacks',   label: 'Chargebacks' },
-  { id: 'statement',     label: 'Statement' },
-  { id: 'profile',       label: '👤 Profile' },
+// Each item lists which permission flag must be true for the tab to render
+// (or null if the tab is always visible — Home, Profile, Statement).
+const ALL_NAV_ITEMS = [
+  { id: 'home',          label: 'Home',          icon: '🏠', permFlag: null },
+  { id: 'transactions',  label: 'Transactions',  icon: '📊', permFlag: 'can_master_ledger' },
+  { id: 'payment_links', label: 'Payment Links', icon: '🔗', permFlag: 'can_payment_links' },
+  { id: 'invoices',      label: 'Invoices',      icon: '🧾', permFlag: 'can_invoices' },
+  { id: 'reserves',      label: 'Reserves',      icon: '🔒', permFlag: 'can_reserves' },
+  { id: 'payouts',       label: 'Payouts',       icon: '💸', permFlag: 'can_payouts' },
+  { id: 'chargebacks',   label: 'Chargebacks',   icon: '⚠️', permFlag: 'can_chargebacks' },
+  { id: 'statement',     label: 'Statement',     icon: '📄', permFlag: 'can_reports' },
+  { id: 'terminal',      label: 'Terminal',      icon: '⚡', permFlag: 'can_virtual_terminal', requiresTerminalAccess: true },
+  { id: 'profile',       label: 'Profile',       icon: '👤', permFlag: null },
 ];
 
 export default function ClientPortal() {
@@ -33,10 +37,16 @@ export default function ClientPortal() {
   const [perms, setPerms] = useState(null);
   const [usage, setUsage] = useState(null);
 
-  // Show Terminal tab only if the client has access enabled.
-  const TABS = terminalAccess
-    ? [...BASE_TABS, { id: 'terminal', label: '⚡ Terminal' }]
-    : BASE_TABS;
+  // Build the sidebar nav: filter ALL_NAV_ITEMS by permission flags + terminal access probe.
+  // If perms isn't loaded yet, allow every tab (avoids a blank sidebar on first paint).
+  const NAV_ITEMS = ALL_NAV_ITEMS.filter((item) => {
+    if (item.requiresTerminalAccess && !terminalAccess) return false;
+    if (!item.permFlag) return true;
+    if (!perms) return true; // perms still loading — show optimistically
+    return !!perms[item.permFlag];
+  });
+  // Legacy alias kept so older inline code that references TABS still works.
+  const TABS = NAV_ITEMS;
 
   async function load() {
     try { setData(await api.get('/api/portal/me')); }
@@ -114,25 +124,38 @@ export default function ClientPortal() {
               </div>
             )}
 
-            {/* Tabs */}
-            <div className="flex gap-1 mb-4 border-b" style={{ borderColor: 'var(--border)' }}>
-              {TABS.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => setTab(t.id)}
-                  style={{
-                    padding: '8px 14px',
-                    fontSize: 13,
-                    fontWeight: 500,
-                    color: tab === t.id ? 'var(--accent)' : 'var(--text-secondary)',
-                    borderBottom: `2px solid ${tab === t.id ? 'var(--accent)' : 'transparent'}`,
-                    background: 'transparent',
-                    cursor: 'pointer',
-                    marginBottom: -1,
-                  }}
-                >{t.label}</button>
-              ))}
-            </div>
+            {/* Sidebar + main layout (replaces top-tab strip) */}
+            <div className="grid gap-4 mb-4" style={{ gridTemplateColumns: 'minmax(180px, 220px) 1fr' }}>
+              <aside style={{
+                borderRight: '1px solid var(--border)',
+                paddingRight: 12,
+                position: 'sticky',
+                top: 16,
+                alignSelf: 'flex-start',
+              }}>
+                <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-tertiary)', padding: '4px 8px 6px' }}>
+                  My Portal
+                </div>
+                <nav className="flex flex-col gap-0.5">
+                  {NAV_ITEMS.map((t) => (
+                    <button key={t.id} onClick={() => setTab(t.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '8px 10px', borderRadius: 8, border: 'none',
+                        background: tab === t.id ? 'var(--accent-dim)' : 'transparent',
+                        color: tab === t.id ? 'var(--accent)' : 'var(--text-secondary)',
+                        fontSize: 13, fontWeight: 500, cursor: 'pointer',
+                        textAlign: 'left',
+                      }}>
+                      <span>{t.icon}</span>
+                      <span>{t.label}</span>
+                    </button>
+                  ))}
+                </nav>
+              </aside>
+
+              <div className="min-w-0">
+                {/* Tab content rendered below — we close this column at the end of the sections. */}
 
             {tab === 'home' && (
               <ClientHomeTab data={data} perms={perms} usage={usage}
@@ -285,6 +308,12 @@ export default function ClientPortal() {
             {tab === 'terminal' && terminalAccess && (
               <TerminalTab access={terminalAccess} clientName={data.client.name} />
             )}
+
+            {tab === 'invoices' && (
+              <ClientInvoicesTab data={data} />
+            )}
+              </div>{/* close right-column main */}
+            </div>{/* close grid wrapper */}
           </>
         )}
       </div>
@@ -797,6 +826,100 @@ function ProfileStat({ label, value }) {
     <div style={{ background: 'var(--bg-tertiary)', borderRadius: 8, padding: 10 }}>
       <div style={{ fontSize: 10, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em' }}>{label}</div>
       <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginTop: 4 }}>{value}</div>
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Client-scoped Invoices tab — read-only list of THIS client's invoices.
+// (Reuses the data already fetched in /api/portal/me.)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function ClientInvoicesTab({ data }) {
+  const invoices = data?.invoices || [];
+  const totals = invoices.reduce((acc, inv) => {
+    acc.total += parseFloat(inv.total_amount) || 0;
+    if (inv.status === 'paid') acc.paid += parseFloat(inv.total_amount) || 0;
+    if (['sent', 'viewed', 'overdue'].includes(inv.status)) acc.outstanding += parseFloat(inv.total_amount) || 0;
+    return acc;
+  }, { total: 0, paid: 0, outstanding: 0 });
+  const STATUS_TONE = {
+    draft: 'neutral', sent: 'info', viewed: 'info',
+    paid: 'success', overdue: 'warning', cancelled: 'danger',
+  };
+
+  function downloadPdf(inv) {
+    const token = localStorage.getItem('foundapay_token');
+    fetch(`/api/invoices/${inv.id}/pdf`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.blob() : Promise.reject(new Error('PDF download failed')))
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `${inv.invoice_number}.pdf`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      })
+      .catch((e) => toast.error(e.message));
+  }
+
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <Card className="p-4">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Invoices</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>{invoices.length}</div>
+        </Card>
+        <Card className="p-4">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Paid</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--success)' }}>{money(totals.paid)}</div>
+        </Card>
+        <Card className="p-4">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Outstanding</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--warning)' }}>{money(totals.outstanding)}</div>
+        </Card>
+      </div>
+
+      <Card>
+        <Table>
+          <Thead>
+            <Tr>
+              <Th>Invoice #</Th>
+              <Th>Issued</Th>
+              <Th>Due</Th>
+              <Th>Customer</Th>
+              <Th className="text-right">Amount</Th>
+              <Th>Status</Th>
+              <Th>Actions</Th>
+            </Tr>
+          </Thead>
+          <tbody>
+            {invoices.length === 0 && (
+              <Tr>
+                <Td colSpan="7" style={{ textAlign: 'center', padding: 28, color: 'var(--text-tertiary)' }}>
+                  No invoices yet.
+                </Td>
+              </Tr>
+            )}
+            {invoices.map((inv) => (
+              <Tr key={inv.id}>
+                <Td className="font-mono text-xs">{inv.invoice_number}</Td>
+                <Td className="text-xs">{dateOnly(inv.issue_date)}</Td>
+                <Td className="text-xs">{inv.due_date ? dateOnly(inv.due_date) : '—'}</Td>
+                <Td>
+                  <div style={{ fontSize: 12 }}>{inv.customer_name || '—'}</div>
+                  {inv.customer_email && <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{inv.customer_email}</div>}
+                </Td>
+                <Td className="text-right font-mono">{money(inv.total_amount)}</Td>
+                <Td><Badge tone={STATUS_TONE[inv.status] || 'neutral'}>{inv.status}</Badge></Td>
+                <Td>
+                  <Button size="sm" variant="secondary" onClick={() => downloadPdf(inv)}>
+                    <Download size={12} /> PDF
+                  </Button>
+                </Td>
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      </Card>
     </div>
   );
 }
