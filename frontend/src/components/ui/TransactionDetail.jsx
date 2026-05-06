@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Edit2, Trash2, ExternalLink, Save, FileText } from 'lucide-react';
+import { Edit2, Trash2, ExternalLink, Save, FileText, RotateCcw } from 'lucide-react';
 import { api } from '../../utils/api';
 import SlideOver from './SlideOver';
 import { Badge, Button, Input, Select, Label, Textarea, money, dateOnly } from './index';
@@ -86,6 +86,24 @@ export default function TransactionDetail({ tx, onClose, onSaved, onDeleted, cli
     finally { setBusy(false); }
   }
 
+  async function requestRefund() {
+    const reason = prompt(`Request refund for transaction #${tx.id} — ${money(tx.gross_amount)}?\n\nEnter a reason (visible to admin + super admin):`);
+    if (!reason) return;
+    setBusy(true);
+    try {
+      await api.post('/api/approvals', {
+        type: 'refund_request',
+        reference_type: 'transaction',
+        reference_id: String(tx.id),
+        amount: parseFloat(tx.gross_amount),
+        currency: 'USD',
+        request_reason: reason,
+      });
+      toast.success('Refund request submitted to admin for review');
+    } catch (e) { toast.error(e.message); }
+    finally { setBusy(false); }
+  }
+
   async function del() {
     if (!confirm(`Delete transaction #${tx.id} — ${money(tx.gross_amount)} from ${tx.counterparty_name || '—'}? This cannot be undone.`)) return;
     setBusy(true);
@@ -113,6 +131,11 @@ export default function TransactionDetail({ tx, onClose, onSaved, onDeleted, cli
           {!isCreate && (
             <Button variant="secondary" onClick={() => downloadReceipt(tx.id)}>
               <FileText size={14} /> Receipt
+            </Button>
+          )}
+          {!isCreate && tx.type === 'Received' && tx.status !== 'Refunded' && tx.status !== 'Voided' && (
+            <Button variant="secondary" onClick={requestRefund} disabled={busy}>
+              <RotateCcw size={14} /> Request Refund
             </Button>
           )}
           <Button variant="ghost" onClick={onClose}>Cancel</Button>

@@ -53,7 +53,11 @@ router.use((req, res, next) => {
 // ── GET /api/transactions ────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const { client_id, entity_id, type, status, method, from, to, search, limit = 1000, offset = 0, include_deleted } = req.query;
+    const {
+      client_id, entity_id, merchant_id, type, status, method, from, to, search,
+      min_amount, max_amount, source, reconciliation_status,
+      limit = 1000, offset = 0, include_deleted,
+    } = req.query;
     const where = [];
     const params = [];
     // Hide soft-deleted rows by default. Pass ?include_deleted=true to see them
@@ -61,16 +65,33 @@ router.get('/', async (req, res) => {
     if (include_deleted !== 'true' || req.user.role !== 'super_admin') {
       where.push(`t.is_deleted = false`);
     }
-    if (client_id) { params.push(client_id); where.push(`t.client_id = $${params.length}`); }
-    if (entity_id) { params.push(entity_id); where.push(`t.entity_id = $${params.length}`); }
-    if (type)      { params.push(type);      where.push(`t.type = $${params.length}`); }
-    if (status)    { params.push(status);    where.push(`t.status = $${params.length}`); }
-    if (method)    { params.push(method);    where.push(`t.payment_method = $${params.length}`); }
-    if (from)      { params.push(from);      where.push(`t.date_received >= $${params.length}`); }
-    if (to)        { params.push(to);        where.push(`t.date_received <= $${params.length}`); }
+    if (client_id)   { params.push(client_id);   where.push(`t.client_id = $${params.length}`); }
+    if (entity_id)   { params.push(entity_id);   where.push(`t.entity_id = $${params.length}`); }
+    if (merchant_id) { params.push(merchant_id); where.push(`t.merchant_id = $${params.length}`); }
+    if (type)        { params.push(type);        where.push(`t.type = $${params.length}`); }
+    if (status)      { params.push(status);      where.push(`t.status = $${params.length}`); }
+    if (method)      { params.push(method);      where.push(`t.payment_method = $${params.length}`); }
+    if (from)        { params.push(from);        where.push(`t.date_received >= $${params.length}`); }
+    if (to)          { params.push(to);          where.push(`t.date_received <= $${params.length}`); }
+    if (min_amount)  { params.push(min_amount);  where.push(`t.gross_amount >= $${params.length}`); }
+    if (max_amount)  { params.push(max_amount);  where.push(`t.gross_amount <= $${params.length}`); }
+    if (source) {
+      // Allow comma-separated: ?source=manual,virtual_terminal
+      const arr = String(source).split(',').map((s) => s.trim()).filter(Boolean);
+      if (arr.length === 1) { params.push(arr[0]); where.push(`t.source = $${params.length}`); }
+      else if (arr.length > 1) { params.push(arr); where.push(`t.source = ANY($${params.length}::text[])`); }
+    }
+    if (reconciliation_status) {
+      // 'reconciled' | 'unreconciled' — based on whether tx has been linked to a bank_transaction
+      if (reconciliation_status === 'reconciled') {
+        where.push(`EXISTS (SELECT 1 FROM bank_transactions bt WHERE bt.matched_transaction_id = t.id AND bt.is_deleted = false)`);
+      } else if (reconciliation_status === 'unreconciled') {
+        where.push(`NOT EXISTS (SELECT 1 FROM bank_transactions bt WHERE bt.matched_transaction_id = t.id AND bt.is_deleted = false)`);
+      }
+    }
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(t.counterparty_name ILIKE $${params.length} OR t.notes ILIKE $${params.length} OR t.external_txn_id ILIKE $${params.length})`);
+      where.push(`(t.counterparty_name ILIKE $${params.length} OR t.notes ILIKE $${params.length} OR t.external_txn_id ILIKE $${params.length} OR t.customer_name ILIKE $${params.length} OR t.customer_email ILIKE $${params.length} OR t.processor_reference ILIKE $${params.length})`);
     }
     const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
     params.push(limit, offset);

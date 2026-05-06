@@ -23,6 +23,23 @@ export default function Payouts() {
 
   async function advance(id) { await api.post(`/api/payouts/${id}/advance`, {}); load(); }
   async function reject(id) { const reason = prompt('Reason?'); if (reason !== null) { await api.post(`/api/payouts/${id}/reject`, { reason }); load(); } }
+  async function requestPayoutApproval(p) {
+    const reason = prompt(`Request approval to send payout to ${p.client_name} — ${money(p.amount, p.currency || 'USD')}?\n\nEnter a reason for super admin:`);
+    if (!reason) return;
+    try {
+      await api.post('/api/approvals', {
+        type: 'payout_request',
+        reference_type: 'payout',
+        reference_id: p.id,
+        amount: parseFloat(p.amount),
+        currency: p.currency || 'USD',
+        request_reason: reason,
+      });
+      alert('Payout approval request submitted to admin for review.');
+    } catch (e) {
+      alert(`Failed: ${e.message}`);
+    }
+  }
 
   return (
     <div className="p-6 max-w-[1700px] mx-auto">
@@ -57,7 +74,12 @@ export default function Payouts() {
                 <Td className="font-mono text-[var(--text-tertiary)] text-xs">{p.reference_number || '—'}</Td>
                 <Td><Badge tone="blue">{p.status}</Badge></Td>
                 <Td>
-                  <div className="flex gap-2 text-xs">
+                  <div className="flex gap-2 text-xs flex-wrap">
+                    {p.status !== 'closed' && p.status !== 'rejected' && p.status !== 'sent' && (
+                      <button className="text-violet-400" onClick={() => requestPayoutApproval(p)} title="Open a 2-step approval (admin → super admin)">
+                        Request Payout
+                      </button>
+                    )}
                     {p.status !== 'closed' && p.status !== 'rejected' && <button className="text-emerald-400" onClick={() => advance(p.id)}>Advance</button>}
                     {p.status !== 'closed' && p.status !== 'rejected' && <button className="text-red-400" onClick={() => reject(p.id)}>Reject</button>}
                     <button className="text-[var(--accent)]" onClick={() => setEdit(p)}>Edit</button>

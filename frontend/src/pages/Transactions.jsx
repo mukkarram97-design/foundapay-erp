@@ -22,7 +22,11 @@ export default function Transactions() {
   const [clients, setClients] = useState([]);
   const [entities, setEntities] = useState([]);
   const [search, setSearch] = useState('');
-  const [filters, setFilters] = useState({ type: '', status: '', method: '', client_id: '', entity_id: '', from: '', to: '' });
+  const [filters, setFilters] = useState({
+    type: '', status: '', method: '', client_id: '', entity_id: '', from: '', to: '',
+    min_amount: '', max_amount: '', source: '', reconciliation_status: '',
+  });
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [showFilters, setShowFilters] = useState(true);
   const [openTx, setOpenTx] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -36,18 +40,21 @@ export default function Transactions() {
   async function load() {
     setLoading(true);
     try {
+      const params = new URLSearchParams({ limit: '1000' });
+      // Reconciliation status needs a server-side join, so re-fetch when it changes.
+      if (filters.reconciliation_status) params.set('reconciliation_status', filters.reconciliation_status);
       const [tx, cl, en] = await Promise.all([
-        api.get('/api/transactions?limit=1000'),
-        api.get('/api/clients'),
-        api.get('/api/entities'),
+        api.get(`/api/transactions?${params.toString()}`),
+        clients.length ? Promise.resolve({ rows: clients }) : api.get('/api/clients'),
+        entities.length ? Promise.resolve({ rows: entities }) : api.get('/api/entities'),
       ]);
       setRows(tx.rows);
-      setClients(cl.rows);
-      setEntities(en.rows);
+      if (!clients.length) setClients(cl.rows);
+      if (!entities.length) setEntities(en.rows);
     } catch (e) { setErr(e.message); }
     finally { setLoading(false); }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [filters.reconciliation_status]);
 
   // / shortcut to focus search
   useEffect(() => {
@@ -72,6 +79,15 @@ export default function Transactions() {
       if (filters.entity_id && t.entity_id !== filters.entity_id) return false;
       if (filters.from && (t.date_received || '') < filters.from) return false;
       if (filters.to && (t.date_received || '') > filters.to) return false;
+      if (filters.min_amount && parseFloat(t.gross_amount) < parseFloat(filters.min_amount)) return false;
+      if (filters.max_amount && parseFloat(t.gross_amount) > parseFloat(filters.max_amount)) return false;
+      if (filters.source) {
+        const wanted = String(filters.source).split(',').map((s) => s.trim()).filter(Boolean);
+        if (wanted.length > 0 && !wanted.includes(t.source || '')) return false;
+      }
+      // reconciliation_status is server-side filtered (uses bank_transactions join);
+      // client-side post-filter would require loading bank_transactions, which we
+      // don't here, so when this is set we trust whatever the server returned.
       if (s) {
         const hay = `${t.id} ${t.counterparty_name || ''} ${t.client_name || ''} ${t.entity_name || ''} ${t.merchant_account || ''} ${t.notes || ''}`.toLowerCase();
         if (!hay.includes(s)) return false;
@@ -101,7 +117,10 @@ export default function Transactions() {
   const totalPages = pageSize === 'all' ? 1 : Math.max(1, Math.ceil(filtered.length / pageSize));
 
   function clearFilters() {
-    setFilters({ type: '', status: '', method: '', client_id: '', entity_id: '', from: '', to: '' });
+    setFilters({
+      type: '', status: '', method: '', client_id: '', entity_id: '', from: '', to: '',
+      min_amount: '', max_amount: '', source: '', reconciliation_status: '',
+    });
     setSearch('');
     setPage(1);
   }
@@ -177,8 +196,51 @@ export default function Transactions() {
               <Input type="date" value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} placeholder="From" />
               <Input type="date" value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} placeholder="To" />
               <Button variant="secondary" onClick={clearFilters}>Clear</Button>
-              <div></div>
+              <button onClick={() => setShowAdvanced((s) => !s)}
+                style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
+                         color: 'var(--accent)', fontSize: 12, fontWeight: 500, cursor: 'pointer' }}>
+                Advanced filters {showAdvanced ? '▴' : '▾'}
+              </button>
             </div>
+
+            {/* Advanced filters — collapsible */}
+            {showAdvanced && (
+              <div style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10 }}>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <div>
+                    <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 4 }}>Min amount</div>
+                    <Input type="number" step="0.01" placeholder="0.00"
+                      value={filters.min_amount}
+                      onChange={(e) => setFilters((f) => ({ ...f, min_amount: e.target.value }))} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 4 }}>Max amount</div>
+                    <Input type="number" step="0.01" placeholder="∞"
+                      value={filters.max_amount}
+                      onChange={(e) => setFilters((f) => ({ ...f, max_amount: e.target.value }))} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 4 }}>Source</div>
+                    <Select value={filters.source} onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}>
+                      <option value="">All sources</option>
+                      <option value="manual">Manual</option>
+                      <option value="virtual_terminal">Virtual Terminal</option>
+                      <option value="payment_link">Payment Link</option>
+                      <option value="invoice">Invoice</option>
+                      <option value="imported">Imported (CSV)</option>
+                    </Select>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 4 }}>Reconciliation</div>
+                    <Select value={filters.reconciliation_status} onChange={(e) => setFilters((f) => ({ ...f, reconciliation_status: e.target.value }))}>
+                      <option value="">All</option>
+                      <option value="reconciled">Reconciled (matched to bank)</option>
+                      <option value="unreconciled">Unreconciled</option>
+                    </Select>
+                  </div>
+                </div>
+              </div>
+            )}
             {activeFilters.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-2">
                 {activeFilters.map(({ k, v }) => (

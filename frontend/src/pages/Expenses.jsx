@@ -25,6 +25,24 @@ export default function Expenses() {
   }
   useEffect(() => { load(); }, []);
 
+  async function submitForApproval(r) {
+    const reason = prompt(`Submit expense for super-admin approval?\n\n${r.vendor || r.description || ''} — ${money(r.amount)}\n\nEnter notes (optional):`);
+    if (reason === null) return;
+    try {
+      await api.post('/api/approvals', {
+        type: 'expense_approval',
+        reference_type: 'expense',
+        reference_id: r.id,
+        amount: parseFloat(r.amount),
+        currency: 'USD',
+        request_reason: reason || `Approval requested for expense: ${r.vendor || r.description || r.id}`,
+      });
+      alert('Expense submitted for super-admin approval.');
+    } catch (e) {
+      alert(`Failed: ${e.message}`);
+    }
+  }
+
   const grouped = {};
   for (const r of rows) {
     const k = r.card_id || 'no_card';
@@ -68,7 +86,16 @@ export default function Expenses() {
                   <Td className="text-[var(--text-tertiary)] text-xs">{r.card_nickname ? `${r.card_nickname} ••${r.card_last4}` : '—'}</Td>
                   <Td><Badge>{r.category || 'Uncategorized'}</Badge></Td>
                   <Td className="text-right font-mono">{money(r.amount)}</Td>
-                  <Td><button className="text-[var(--accent)] text-xs" onClick={() => setEdit(r)}>Edit</button></Td>
+                  <Td>
+                    <div className="flex gap-2 text-xs flex-wrap">
+                      {r.status !== 'approved' && (
+                        <button className="text-violet-400" onClick={() => submitForApproval(r)} title="Send to super admin for approval">
+                          Submit for Approval
+                        </button>
+                      )}
+                      <button className="text-[var(--accent)]" onClick={() => setEdit(r)}>Edit</button>
+                    </div>
+                  </Td>
                 </Tr>
               ))}
               {rows.length === 0 && <Tr><Td colSpan="7"><span className="text-[var(--text-tertiary)]">No expenses yet</span></Td></Tr>}
