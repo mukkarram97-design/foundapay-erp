@@ -17,6 +17,20 @@ export default function BankAccounts() {
   const [editing, setEditing] = useState(null);
   const [openDetail, setOpenDetail] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  // Synthetic Wise multi-currency account (lives in Wise, not the banks table).
+  const [wiseBalances, setWiseBalances] = useState(null);
+  const [wiseSyncing, setWiseSyncing] = useState(false);
+  const [wiseErr, setWiseErr] = useState(null);
+
+  async function loadWise() {
+    setWiseSyncing(true); setWiseErr(null);
+    try {
+      const r = await api.get('/api/wise/balances');
+      setWiseBalances(r.balances || []);
+    } catch (e) { setWiseErr(e.message); setWiseBalances(null); }
+    finally { setWiseSyncing(false); }
+  }
+  useEffect(() => { loadWise(); }, []);
 
   async function load() {
     setLoading(true); setErr(null);
@@ -71,6 +85,9 @@ export default function BankAccounts() {
       />
 
       {err && <Alert tone="error" className="mb-4">{err}</Alert>}
+
+      {/* Wise multi-currency account (synthetic — lives in Wise, not banks table) */}
+      <WiseAccountCard balances={wiseBalances} err={wiseErr} syncing={wiseSyncing} onSync={loadWise} />
 
       <Card style={{ overflow: 'visible' }}>
         <Table>
@@ -154,6 +171,60 @@ export default function BankAccounts() {
         </Modal>
       )}
     </div>
+  );
+}
+
+// ━━━ Wise multi-currency account card ━━━
+function WiseAccountCard({ balances, err, syncing, onSync }) {
+  const total = Array.isArray(balances)
+    ? balances.reduce((s, b) => s + (parseFloat(b.amount?.value ?? b.amount) || 0), 0)
+    : 0;
+  if (!balances && !err) return null; // not configured yet
+  return (
+    <Card className="p-4 mb-4">
+      <div className="flex items-start gap-3 mb-3">
+        <div style={{ width: 56, height: 56, borderRadius: 10, background: 'linear-gradient(135deg,#9FE870 0%,#00B9FF 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 800, color: '#0E2C0E' }}>
+          W
+        </div>
+        <div className="flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>Wise — Nextgenase Inc</div>
+            <Badge tone="info">Multi-currency</Badge>
+            {!err && <Badge tone="success">Live</Badge>}
+            {err && <Badge tone="danger">Error</Badge>}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
+            Held in Wise · transfers go through <a href="/remittance" style={{ color: 'var(--accent)' }}>Remittance</a>
+          </div>
+        </div>
+        <Button variant="secondary" size="sm" onClick={onSync} disabled={syncing}>
+          <RefreshCw size={12} /> {syncing ? 'Syncing…' : 'Sync balance'}
+        </Button>
+      </div>
+
+      {err && <Alert tone="error" className="mb-2">{err}</Alert>}
+
+      {Array.isArray(balances) && balances.length > 0 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {balances.map((b, i) => {
+            const cur = b.currency || b.amount?.currency || '—';
+            const amt = b.amount?.value ?? b.amount ?? 0;
+            return (
+              <div key={i} style={{ padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg-tertiary)' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{cur}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: parseFloat(amt) > 0 ? 'var(--text-primary)' : 'var(--text-tertiary)' }}>
+                  {money(amt, cur)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {Array.isArray(balances) && balances.length === 0 && (
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>No balances yet on this Wise account.</div>
+      )}
+    </Card>
   );
 }
 
