@@ -37,6 +37,10 @@ const csvUpload = multer({
 });
 
 // ━━━ GET /api/banks ━━━
+// Returns all non-deleted bank accounts AND, when Wise is configured, prepends
+// a synthetic Wise row (id='wise-nextgenase', is_wise=true) so the frontend
+// renders Wise as just another bank card. Wise balance fetch is best-effort —
+// if Wise is down or returns an error, the synthetic row is omitted.
 router.get('/', async (req, res) => {
   try {
     const r = await pool.query(`
@@ -51,7 +55,50 @@ router.get('/', async (req, res) => {
        WHERE b.is_deleted = false
        ORDER BY b.created_at DESC
     `);
-    res.json({ rows: r.rows });
+
+    const rows = r.rows;
+
+    // Append Wise synthetic row at the head of the list when configured.
+    try {
+      const wise = require('../services/wise');
+      if (wise.isConfigured()) {
+        const balances = await wise.getBalances();
+        const list = Array.isArray(balances) ? balances : [];
+        const usd = list.find((b) => (b.currency || b.amount?.currency) === 'USD');
+        const usdBalance = parseFloat(usd?.amount?.value ?? usd?.amount ?? 0) || 0;
+        const extraBalances = list
+          .filter((b) => (b.currency || b.amount?.currency) !== 'USD')
+          .map((b) => ({
+            currency: b.currency || b.amount?.currency || 'UNK',
+            amount: parseFloat(b.amount?.value ?? b.amount ?? 0) || 0,
+          }));
+        rows.unshift({
+          id: 'wise-nextgenase',
+          bank_name: 'Wise',
+          account_nickname: 'Nextgenase Inc — Wise',
+          account_type: 'Multi-currency',
+          account_last4: null,
+          entity_name: 'Nextgenase Inc',
+          entity_id: null,
+          status: 'active',
+          current_balance: usdBalance,
+          opening_balance: usdBalance,
+          plaid_connected: false,
+          plaid_synced_at: new Date().toISOString(),
+          tx_count: 0,
+          is_wise: true,
+          sync_method: 'wise',
+          extra_balances: extraBalances,
+          all_balances: list, // raw, for the multi-currency grid
+          created_at: new Date().toISOString(),
+        });
+      }
+    } catch (e) {
+      // Wise unavailable — skip the synthetic row, keep returning the regular list.
+      console.warn('[banks list] wise inclusion failed:', e.message);
+    }
+
+    res.json({ rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

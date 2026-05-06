@@ -38,41 +38,77 @@ router.post('/manual', authRequired, async (req, res) => {
     if (!b.sourceAmount || !b.recipientName) {
       return res.status(400).json({ error: 'sourceAmount and recipientName required' });
     }
-    const r = await pool.query(`
-      INSERT INTO remittances
-        (provider, provider_reference, provider_fee, provider_exchange_rate,
-         source_currency, target_currency, source_amount, target_amount,
-         exchange_rate, wise_fee,
-         recipient_name, recipient_bank, recipient_account, recipient_country,
-         purpose, reference,
-         payroll_item_id, payout_id, expense_id,
-         status, created_by)
-      VALUES ('manual', $1, $2, $3,
-              $4, $5, $6, $7,
-              $8, NULL,
-              $9, $10, $11, $12,
-              $13, $14,
-              $15, $16, $17,
-              'transfer_created', $18)
-      RETURNING *
-    `, [
-      b.providerReference || null, b.providerFee || null, b.exchangeRate || null,
-      b.sourceCurrency || 'USD', b.targetCurrency || 'USD',
-      b.sourceAmount, b.targetAmount || b.sourceAmount,
-      b.exchangeRate || null,
-      b.recipientName, b.recipientBank || null, b.recipientAccount || null, b.recipientCountry || null,
-      b.purpose || 'other', b.reference || null,
-      b.payrollItemId || null, b.payoutId || null, b.expenseId || null,
-      req.user.id,
-    ]);
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      const r = await c.query(`
+        INSERT INTO remittances
+          (provider, provider_reference, provider_fee, provider_exchange_rate,
+           source_currency, target_currency, source_amount, target_amount,
+           exchange_rate, wise_fee,
+           recipient_name, recipient_bank, recipient_account, recipient_country,
+           purpose, reference,
+           payroll_item_id, payout_id, expense_id,
+           status, created_by)
+        VALUES ('manual', $1, $2, $3,
+                $4, $5, $6, $7,
+                $8, NULL,
+                $9, $10, $11, $12,
+                $13, $14,
+                $15, $16, $17,
+                'transfer_created', $18)
+        RETURNING *
+      `, [
+        b.providerReference || null, b.providerFee || null, b.exchangeRate || null,
+        b.sourceCurrency || 'USD', b.targetCurrency || 'USD',
+        b.sourceAmount, b.targetAmount || b.sourceAmount,
+        b.exchangeRate || null,
+        b.recipientName, b.recipientBank || null, b.recipientAccount || null, b.recipientCountry || null,
+        b.purpose || 'other', b.reference || null,
+        b.payrollItemId || null, b.payoutId || null, b.expenseId || null,
+        req.user.id,
+      ]);
 
-    await logAudit({
-      action: 'remittance.manual_recorded', entityType: 'remittances', entityId: r.rows[0].id,
-      userId: req.user.id,
-      metadata: { amount: b.sourceAmount, currency: b.sourceCurrency, recipient: b.recipientName, reference: b.providerReference || b.reference },
-      ipAddress: req.ip, userAgent: req.headers['user-agent'],
-    });
-    res.status(201).json({ remittance: r.rows[0] });
+      // Master Ledger integration — manual wires get a Processing tx row too.
+      const tx = await c.query(`
+        INSERT INTO transactions
+          (type, status, source, payment_method,
+           counterparty_type, counterparty_name,
+           gross_amount, fee_amount, net_amount,
+           external_txn_id, processor_reference,
+           notes, created_by, date_received, updated_at)
+        VALUES ('Paid', 'Processing', 'remittance', 'Wire Transfer',
+                'Vendor', $1,
+                $2::numeric, 0, $2::numeric,
+                $3, $4,
+                $5, $6, CURRENT_DATE, NOW())
+        RETURNING id
+      `, [
+        b.recipientName || 'Manual wire',
+        b.sourceAmount,
+        b.providerReference || null,
+        b.reference || null,
+        `Manual wire to ${b.recipientName || 'recipient'} (${b.targetCurrency || 'USD'} ${b.targetAmount || ''}). Ref ${b.providerReference || '—'}.`.slice(0, 500),
+        req.user.id,
+      ]);
+      await c.query(`UPDATE remittances SET transaction_id = $1 WHERE id = $2`, [tx.rows[0].id, r.rows[0].id]).catch(() => {});
+
+      await c.query('COMMIT');
+
+      await logAudit({
+        action: 'remittance.manual_recorded', entityType: 'remittances', entityId: r.rows[0].id,
+        userId: req.user.id,
+        metadata: { amount: b.sourceAmount, currency: b.sourceCurrency, recipient: b.recipientName, reference: b.providerReference || b.reference, transaction_id: tx.rows[0].id },
+        ipAddress: req.ip, userAgent: req.headers['user-agent'],
+      });
+      res.status(201).json({ remittance: r.rows[0] });
+    } catch (err) {
+      try { await c.query('ROLLBACK'); } catch {}
+      throw err;
+    } finally {
+      c.release();
+    }
+    return;
   } catch (err) {
     console.error('[remittance manual]', err);
     res.status(500).json({ error: err.message });
@@ -181,9 +217,9 @@ router.post('/transfer', requireConfigured, async (req, res) => {
          purpose, reference,
          payroll_item_id, payout_id, expense_id,
          status, wise_status, estimated_delivery,
-         created_by)
+         created_by, provider)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-              'transfer_created', $19, $20, $21)
+              'transfer_created', $19, $20, $21, 'wise')
       RETURNING *
     `, [
       String(wiseRes.id), b.quoteUuid, String(b.recipientId),
@@ -195,6 +231,32 @@ router.post('/transfer', requireConfigured, async (req, res) => {
       wiseRes.status || null, wiseRes.estimatedDelivery || null,
       req.user.id,
     ]);
+
+    // Master Ledger integration: every remittance is also a Paid transaction.
+    const tx = await c.query(`
+      INSERT INTO transactions
+        (type, status, source, payment_method,
+         counterparty_type, counterparty_name,
+         gross_amount, fee_amount, net_amount,
+         external_txn_id, processor_reference,
+         notes, created_by, date_received, updated_at)
+      VALUES ('Paid', 'Processing', 'remittance', 'Wire Transfer',
+              'Vendor', $1,
+              $2::numeric, 0, $2::numeric,
+              $3, $4,
+              $5, $6, CURRENT_DATE, NOW())
+      RETURNING id
+    `, [
+      b.recipientName || 'Wise transfer',
+      b.sourceAmount,
+      String(wiseRes.id),
+      b.reference || null,
+      `Wise transfer to ${b.recipientName || 'recipient'} (${b.targetCurrency || 'PKR'} ${b.targetAmount || ''}). Quote ${b.quoteUuid}.`.slice(0, 500),
+      req.user.id,
+    ]);
+    // Tie the remittance back to the master-ledger row so detail pages can link.
+    await c.query(`UPDATE remittances SET transaction_id = $1 WHERE id = $2`, [tx.rows[0].id, r.rows[0].id]).catch(() => {});
+
     await c.query('COMMIT');
 
     await logAudit({

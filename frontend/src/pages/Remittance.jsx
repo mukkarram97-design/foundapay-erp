@@ -255,6 +255,10 @@ function TransferModal({ providers, onClose, onCreated }) {
     swift: '',
     bankAddress: '',
     city: '',
+    addressLine: '',
+    postCode: '',
+    email: '',
+    legalType: 'PRIVATE',
   });
   const [savedRecipients, setSavedRecipients] = useState([]);
   const [savedRecipientId, setSavedRecipientId] = useState(''); // '' means using inline form
@@ -650,29 +654,52 @@ function RecipientForm({ country, setCountry, recipient, setRecipient, saveForFu
 
       {/* Country-specific fields */}
       {country === 'PK' && (
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <div className="col-span-2"><Label>Pakistani bank *</Label>
-            <Select value={recipient.bankName} onChange={(e) => {
-              const bank = PK_BANKS.find((b) => b.name === e.target.value);
-              setRecipient((r) => ({ ...r, bankName: e.target.value, swift: bank?.swift || r.swift }));
-            }}>
-              <option value="">— Select bank —</option>
-              {PK_BANKS.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
-            </Select>
+        <>
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <div className="col-span-2"><Label>Pakistani bank *</Label>
+              <Select value={recipient.bankName} onChange={(e) => {
+                const bank = PK_BANKS.find((b) => b.name === e.target.value);
+                setRecipient((r) => ({ ...r, bankName: e.target.value, swift: bank?.swift || r.swift }));
+              }}>
+                <option value="">— Select bank —</option>
+                {PK_BANKS.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
+              </Select>
+            </div>
+            <div className="col-span-2"><Label>IBAN * <span style={{ fontSize: 10, color: 'var(--text-tertiary)', textTransform: 'none', fontWeight: 400 }}>(Wise requires IBAN for PKR — PK + 22 chars)</span></Label>
+              <Input placeholder="PK29MEZN0001234567890123" value={recipient.iban}
+                onChange={(e) => setF('iban', e.target.value.toUpperCase().replace(/\s+/g, ''))}
+                maxLength="24" style={{ fontFamily: 'ui-monospace, monospace' }} />
+            </div>
+            <div><Label>Recipient type *</Label>
+              <Select value={recipient.legalType || 'PRIVATE'} onChange={(e) => setF('legalType', e.target.value)}>
+                <option value="PRIVATE">Individual</option>
+                <option value="BUSINESS">Business</option>
+              </Select>
+            </div>
+            <div><Label>BIC / SWIFT (optional)</Label>
+              <Input value={recipient.swift} onChange={(e) => setF('swift', e.target.value.toUpperCase())} />
+            </div>
           </div>
-          <div><Label>Account IBAN <span style={{ fontSize: 10, color: 'var(--text-tertiary)', textTransform: 'none', fontWeight: 400 }}>(PK + 22 digits)</span></Label>
-            <Input placeholder="PK00…" value={recipient.iban} onChange={(e) => setF('iban', e.target.value.toUpperCase())} maxLength="24" />
+          <div className="mt-3" style={{ borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+              Recipient address (Wise requires this for PKR)
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><Label>Address line *</Label>
+                <Input value={recipient.addressLine} onChange={(e) => setF('addressLine', e.target.value)} placeholder="123 Main St" />
+              </div>
+              <div><Label>City *</Label>
+                <Input value={recipient.city} onChange={(e) => setF('city', e.target.value)} placeholder="Karachi" />
+              </div>
+              <div><Label>Post code *</Label>
+                <Input value={recipient.postCode} onChange={(e) => setF('postCode', e.target.value)} placeholder="74600" />
+              </div>
+              <div className="col-span-2"><Label>Email (optional)</Label>
+                <Input type="email" value={recipient.email || ''} onChange={(e) => setF('email', e.target.value)} />
+              </div>
+            </div>
           </div>
-          <div><Label>OR Account number</Label>
-            <Input value={recipient.accountNumber} onChange={(e) => setF('accountNumber', e.target.value)} />
-          </div>
-          <div><Label>Branch code</Label>
-            <Input value={recipient.branchCode} onChange={(e) => setF('branchCode', e.target.value)} />
-          </div>
-          <div><Label>City</Label>
-            <Input value={recipient.city} onChange={(e) => setF('city', e.target.value)} />
-          </div>
-        </div>
+        </>
       )}
 
       {country === 'US' && (
@@ -740,21 +767,30 @@ function RecipientForm({ country, setCountry, recipient, setRecipient, saveForFu
 }
 
 // Helper: build the right Wise createRecipient body shape per country.
+// Verified against Wise account-requirements API (run from server) — see
+// `docs/wise-account-requirements.md` for the live response.
 async function createWiseRecipient({ country, recipient, currency }) {
   let body;
   if (country === 'PK') {
+    // Wise's requirement for PKR is type='iban' with full postal address.
+    // Local-format account types (pakistan_local etc) are NOT enabled on
+    // the Nextgenase profile — Wise returns "Creating an account of this
+    // type is not allowed" for anything other than 'iban'.
     body = {
       currency: 'PKR',
-      type: 'pakistan',
-      profile: undefined, // backend fills
+      type: 'iban',
       accountHolderName: recipient.name,
       details: {
-        legalType: 'PRIVATE',
-        bankName: recipient.bankName,
-        accountNumber: recipient.accountNumber || undefined,
-        IBAN: recipient.iban || undefined,
-        branchCode: recipient.branchCode || undefined,
-        address: { city: recipient.city || 'Karachi', country: 'PK' },
+        legalType: (recipient.legalType || 'PRIVATE').toUpperCase(),
+        IBAN: (recipient.iban || '').replace(/\s+/g, '').toUpperCase(),
+        BIC: recipient.swift || undefined,
+        email: recipient.email || undefined,
+        address: {
+          country: 'PK',
+          city: recipient.city || '',
+          firstLine: recipient.addressLine || '',
+          postCode: recipient.postCode || '',
+        },
       },
     };
   } else if (country === 'US') {
@@ -763,11 +799,16 @@ async function createWiseRecipient({ country, recipient, currency }) {
       type: 'aba',
       accountHolderName: recipient.name,
       details: {
-        legalType: 'PRIVATE',
+        legalType: (recipient.legalType || 'PRIVATE').toUpperCase(),
         abartn: recipient.routingNumber,
         accountNumber: recipient.accountNumber,
         accountType: (recipient.accountType || 'checking').toUpperCase(),
-        address: { country: 'US' },
+        address: {
+          country: 'US',
+          city: recipient.city || '',
+          firstLine: recipient.addressLine || '',
+          postCode: recipient.postCode || '',
+        },
       },
     };
   } else if (country === 'GB') {
@@ -776,7 +817,7 @@ async function createWiseRecipient({ country, recipient, currency }) {
       type: 'sort_code',
       accountHolderName: recipient.name,
       details: {
-        legalType: 'PRIVATE',
+        legalType: (recipient.legalType || 'PRIVATE').toUpperCase(),
         sortCode: recipient.sortCode,
         accountNumber: recipient.accountNumber,
       },
@@ -787,11 +828,15 @@ async function createWiseRecipient({ country, recipient, currency }) {
       type: 'iban',
       accountHolderName: recipient.name,
       details: {
-        legalType: 'PRIVATE',
-        IBAN: recipient.iban || recipient.accountNumber,
+        legalType: (recipient.legalType || 'PRIVATE').toUpperCase(),
+        IBAN: (recipient.iban || recipient.accountNumber || '').replace(/\s+/g, '').toUpperCase(),
         BIC: recipient.swift || undefined,
-        bankName: recipient.bankName,
-        bankAddress: recipient.bankAddress,
+        address: {
+          country,
+          city: recipient.city || '',
+          firstLine: recipient.addressLine || '',
+          postCode: recipient.postCode || '',
+        },
       },
     };
   }

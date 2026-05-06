@@ -17,26 +17,14 @@ export default function BankAccounts() {
   const [editing, setEditing] = useState(null);
   const [openDetail, setOpenDetail] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
-  // Synthetic Wise multi-currency account (lives in Wise, not the banks table).
-  const [wiseBalances, setWiseBalances] = useState(null);
-  const [wiseSyncing, setWiseSyncing] = useState(false);
-  const [wiseErr, setWiseErr] = useState(null);
   // Manual-balance update state — must be declared with the other hooks at top.
   const [manualBalanceFor, setManualBalanceFor] = useState(null);
-
-  async function loadWise() {
-    setWiseSyncing(true); setWiseErr(null);
-    try {
-      const r = await api.get('/api/wise/balances');
-      setWiseBalances(r.balances || []);
-    } catch (e) { setWiseErr(e.message); setWiseBalances(null); }
-    finally { setWiseSyncing(false); }
-  }
-  useEffect(() => { loadWise(); }, []);
+  const [wiseSyncing, setWiseSyncing] = useState(false);
 
   async function load() {
     setLoading(true); setErr(null);
     try {
+      // /api/banks now prepends a synthetic Wise row when configured (is_wise=true)
       const [b, e] = await Promise.all([
         api.get('/api/banks'),
         api.get('/api/entities'),
@@ -47,6 +35,16 @@ export default function BankAccounts() {
     finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
+
+  async function syncWise() {
+    setWiseSyncing(true);
+    try {
+      // Re-fetch /api/banks — backend will pull fresh Wise balances
+      await load();
+      toast.success('Wise balances refreshed');
+    } catch (e) { toast.error(e.message); }
+    finally { setWiseSyncing(false); }
+  }
 
   async function syncBank(row) {
     try {
@@ -72,17 +70,13 @@ export default function BankAccounts() {
   }
 
   const totalBalance = rows.reduce((s, r) => s + (parseFloat(r.current_balance) || 0), 0);
-  const wiseUsdEquivalent = Array.isArray(wiseBalances)
-    ? (wiseBalances.find((b) => (b.currency || b.amount?.currency) === 'USD')?.amount?.value || 0)
-    : 0;
-  const grandTotal = totalBalance + (parseFloat(wiseUsdEquivalent) || 0);
-  const accountCount = rows.length + (wiseBalances ? 1 : 0);
+  const accountCount = rows.length;
 
   return (
     <div className="p-6 max-w-[1500px] mx-auto">
       <PageHeader
         title="Bank Accounts"
-        subtitle={`${accountCount} accounts · Total balance ~${money(grandTotal)} (USD-equivalent, Wise USD only)`}
+        subtitle={`${accountCount} accounts · Total balance ${money(totalBalance)} (USD-equivalent)`}
         actions={
           <div className="flex gap-2">
             <PlaidLinkButton entities={entities} onLinked={load} />
@@ -93,11 +87,11 @@ export default function BankAccounts() {
 
       {err && <Alert tone="error" className="mb-4">{err}</Alert>}
 
-      {loading && rows.length === 0 && !wiseBalances && (
+      {loading && rows.length === 0 && (
         <Card className="p-6" style={{ color: 'var(--text-secondary)' }}>Loading bank accounts…</Card>
       )}
 
-      {!loading && rows.length === 0 && !wiseBalances && (
+      {!loading && rows.length === 0 && (
         <Card className="p-12" style={{ textAlign: 'center' }}>
           <div style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>No bank accounts yet</div>
           <div className="flex gap-2 justify-center">
@@ -107,19 +101,16 @@ export default function BankAccounts() {
         </Card>
       )}
 
-      {/* Unified card grid — Wise alongside regular banks */}
+      {/* Unified card grid — Wise (synthetic row from backend) appears alongside regular banks */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* Wise multi-currency card (only renders when Wise is configured) */}
-        {wiseBalances !== null && (
+        {!loading && rows.map((r) => r.is_wise ? (
           <WiseAccountCard
-            balances={wiseBalances}
-            err={wiseErr}
+            key={r.id}
+            row={r}
             syncing={wiseSyncing}
-            onSync={loadWise}
+            onSync={syncWise}
           />
-        )}
-
-        {!loading && rows.map((r) => (
+        ) : (
           <BankCard
             key={r.id}
             row={r}
@@ -243,8 +234,9 @@ function BankCard({ row, onSync, onRefreshBalance, onManualBalance, onEdit, onDe
   );
 }
 
-// ━━━ Wise multi-currency card — same shape as a bank card ━━━
-function WiseAccountCard({ balances, err, syncing, onSync }) {
+// ━━━ Wise multi-currency card — receives synthetic row from /api/banks ━━━
+function WiseAccountCard({ row, syncing, onSync }) {
+  const balances = row.all_balances || [];
   return (
     <Card className="p-4">
       <div className="flex items-start gap-3 mb-3">
@@ -253,21 +245,22 @@ function WiseAccountCard({ balances, err, syncing, onSync }) {
         </div>
         <div className="flex-1 min-w-0">
           <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }} className="truncate">
-            Nextgenase Inc — Wise
+            {row.account_nickname || 'Nextgenase Inc — Wise'}
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-            Multi-currency Account
+            {row.account_type || 'Multi-currency Account'} · Live API
           </div>
         </div>
       </div>
 
-      {err && <Alert tone="error" className="mb-2">{err}</Alert>}
-
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10, marginTop: 6 }}>
-        <div style={{ fontSize: 10, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em' }}>Balances</div>
-        {Array.isArray(balances) && balances.length > 0 ? (
-          <div className="grid grid-cols-2 gap-2 mt-2">
-            {balances.map((b, i) => {
+        <div style={{ fontSize: 10, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em' }}>Primary balance (USD)</div>
+        <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--text-primary)', marginTop: 2 }}>
+          {money(row.current_balance, 'USD')}
+        </div>
+        {balances.length > 1 && (
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            {balances.filter((b) => (b.currency || b.amount?.currency) !== 'USD').map((b, i) => {
               const cur = b.currency || b.amount?.currency || '—';
               const amt = b.amount?.value ?? b.amount ?? 0;
               return (
@@ -284,21 +277,17 @@ function WiseAccountCard({ balances, err, syncing, onSync }) {
               );
             })}
           </div>
-        ) : (
-          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 6 }}>
-            {err ? '(error loading)' : 'No balances yet.'}
-          </div>
         )}
-        <div className="mt-2">
-          <SyncMethodBadge method="wise" lastSyncedAt={Array.isArray(balances) ? new Date().toISOString() : null} />
+        <div className="mt-3">
+          <SyncMethodBadge method="wise" lastSyncedAt={row.plaid_synced_at} />
         </div>
       </div>
 
       <div className="flex items-center gap-2 mt-3 flex-wrap">
         <Button variant="secondary" size="sm" onClick={onSync} disabled={syncing}>
-          <RefreshCw size={12} /> {syncing ? 'Syncing…' : 'Sync balance'}
+          <RefreshCw size={12} /> {syncing ? 'Syncing…' : 'Sync'}
         </Button>
-        <a href="/remittance" style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}>View transfers →</a>
+        <a href="/remittance" style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}>📊 Transactions →</a>
       </div>
     </Card>
   );
