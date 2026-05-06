@@ -49,11 +49,12 @@ router.get('/', blockClientUser, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT c.*,
-             COALESCE(SUM(t.gross_amount) FILTER (WHERE t.type = 'Received'), 0) AS total_gross_received,
-             COALESCE(SUM(t.fee_amount)   FILTER (WHERE t.type = 'Received'), 0) AS total_revenue,
-             COUNT(t.id) AS tx_count
+             COALESCE(SUM(t.gross_amount) FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0) AS total_gross_received,
+             COALESCE(SUM(t.fee_amount)   FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0) AS total_revenue,
+             COUNT(t.id) FILTER (WHERE t.is_deleted = false) AS tx_count
         FROM clients c
         LEFT JOIN transactions t ON t.client_id = c.id
+       WHERE c.is_deleted = false
        GROUP BY c.id
        ORDER BY c.name
     `);
@@ -438,6 +439,38 @@ router.get('/:id/rate-at-date', blockClientUser, async (req, res) => {
       return res.json({ rate: c.rows[0] || null, source: 'clients_table_live' });
     }
     res.json({ rate: r.rows[0], source: 'rate_history' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ━━━ Soft-delete client (super_admin only) ━━━
+// Requires { confirm: <client.name> } in body to guard against accidents.
+router.delete('/:id', async (req, res) => {
+  if (req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Only super_admin can delete clients' });
+  }
+  try {
+    const cur = await pool.query('SELECT id, name FROM clients WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Not found' });
+    const client = cur.rows[0];
+    if ((req.body || {}).confirm !== client.name) {
+      return res.status(400).json({ error: `Confirm with the client's exact name: "${client.name}"` });
+    }
+    await pool.query(
+      `UPDATE clients SET is_deleted = true, updated_at = NOW() WHERE id = $1`,
+      [req.params.id]
+    );
+    await logAudit({
+      action: 'client.deleted',
+      entityType: 'clients',
+      entityId: req.params.id,
+      userId: req.user.id,
+      metadata: { name: client.name },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ ok: true, name: client.name });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

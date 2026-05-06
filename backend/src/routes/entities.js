@@ -14,13 +14,15 @@ router.get('/', async (req, res) => {
     const r = await pool.query(`
       SELECT e.*,
              COALESCE(SUM(t.gross_amount) FILTER (
-               WHERE t.type = 'Received' AND date_trunc('month', t.date_received) = date_trunc('month', CURRENT_DATE)
+               WHERE t.type = 'Received' AND t.is_deleted = false
+                 AND date_trunc('month', t.date_received) = date_trunc('month', CURRENT_DATE)
              ), 0) AS mtd_volume,
-             COUNT(t.id) AS tx_count,
+             COUNT(t.id) FILTER (WHERE t.is_deleted = false) AS tx_count,
              (SELECT json_agg(json_build_object('bank', b.bank_name, 'last4', b.account_last4, 'balance', b.current_balance))
                 FROM bank_accounts b WHERE b.entity_id = e.id) AS banks
         FROM entities e
         LEFT JOIN transactions t ON t.entity_id = e.id
+       WHERE e.is_deleted = false
        GROUP BY e.id
        ORDER BY e.legal_name
     `);
@@ -82,6 +84,40 @@ router.patch('/:id', async (req, res) => {
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(r.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ━━━ Soft-delete entity (super_admin only) ━━━
+// Blocks delete if entity has active (non-deleted) transactions in last 30 days.
+router.delete('/:id', async (req, res) => {
+  if (req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Only super_admin can delete entities' });
+  }
+  try {
+    const cur = await pool.query('SELECT id, legal_name FROM entities WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Not found' });
+    const e = cur.rows[0];
+    if ((req.body || {}).confirm !== e.legal_name) {
+      return res.status(400).json({ error: `Confirm with the entity's exact legal_name: "${e.legal_name}"` });
+    }
+    const recent = await pool.query(`
+      SELECT COUNT(*)::int AS n
+        FROM transactions
+       WHERE entity_id = $1 AND is_deleted = false
+         AND created_at > NOW() - INTERVAL '30 days'
+    `, [req.params.id]);
+    if (recent.rows[0].n > 0) {
+      return res.status(409).json({
+        error: `Entity has ${recent.rows[0].n} active transactions in the last 30 days. Move or delete those first.`,
+      });
+    }
+    await pool.query(
+      `UPDATE entities SET is_deleted = true, updated_at = NOW() WHERE id = $1`,
+      [req.params.id]
+    );
+    res.json({ ok: true, legal_name: e.legal_name });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

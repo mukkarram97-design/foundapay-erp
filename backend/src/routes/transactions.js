@@ -53,9 +53,14 @@ router.use((req, res, next) => {
 // ── GET /api/transactions ────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const { client_id, entity_id, type, status, method, from, to, search, limit = 1000, offset = 0 } = req.query;
+    const { client_id, entity_id, type, status, method, from, to, search, limit = 1000, offset = 0, include_deleted } = req.query;
     const where = [];
     const params = [];
+    // Hide soft-deleted rows by default. Pass ?include_deleted=true to see them
+    // (super_admin only — guarded below).
+    if (include_deleted !== 'true' || req.user.role !== 'super_admin') {
+      where.push(`t.is_deleted = false`);
+    }
     if (client_id) { params.push(client_id); where.push(`t.client_id = $${params.length}`); }
     if (entity_id) { params.push(entity_id); where.push(`t.entity_id = $${params.length}`); }
     if (type)      { params.push(type);      where.push(`t.type = $${params.length}`); }
@@ -91,11 +96,11 @@ router.get('/', async (req, res) => {
 router.get('/summary', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const where = [];
+    const where = ['is_deleted = false'];
     const params = [];
     if (from) { params.push(from); where.push(`date_received >= $${params.length}`); }
     if (to)   { params.push(to);   where.push(`date_received <= $${params.length}`); }
-    const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const whereSQL = `WHERE ${where.join(' AND ')}`;
     const r = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE type = 'Received')                                 AS received_count,
@@ -124,6 +129,7 @@ router.get('/export', async (req, res) => {
         LEFT JOIN clients c ON c.id = t.client_id
         LEFT JOIN entities e ON e.id = t.entity_id
         LEFT JOIN merchants m ON m.id = t.merchant_id
+       WHERE t.is_deleted = false
         ORDER BY t.date_received DESC, t.id DESC
     `);
     const headers = Object.keys(r.rows[0] || { id: 1 });
@@ -292,13 +298,19 @@ router.delete('/:id', requireRole('super_admin'), async (req, res) => {
       [req.user.id, String(id), JSON.stringify(tx), req.ip || null]
     );
 
-    await c.query('DELETE FROM reserves WHERE transaction_id = $1', [id]);
-    await c.query('DELETE FROM chargebacks WHERE transaction_id = $1', [id]);
-    await c.query('DELETE FROM transactions WHERE id = $1', [id]);
+    // Soft delete: preserve data + audit trail. Cascading FKs (reserves,
+    // chargebacks) stay intact — they'll be hidden by their own is_deleted
+    // filters where applicable, or remain visible for forensic purposes.
+    await c.query(
+      `UPDATE transactions
+          SET is_deleted = true, deleted_at = NOW(), deleted_by = $1
+        WHERE id = $2`,
+      [req.user.id, id]
+    );
     await c.query('COMMIT');
 
     res.json({
-      message: 'Transaction deleted',
+      message: 'Transaction soft-deleted (preserved in audit_logs)',
       id: tx.id,
       gross_amount: tx.gross_amount,
       counterparty_name: tx.counterparty_name,
@@ -330,13 +342,19 @@ router.post('/bulk-delete', requireRole('super_admin'), async (req, res) => {
         [req.user.id, String(tx.id), JSON.stringify(tx), req.ip || null]
       );
     }
-    await c.query('DELETE FROM reserves WHERE transaction_id = ANY($1)', [ids]);
-    await c.query('DELETE FROM chargebacks WHERE transaction_id = ANY($1)', [ids]);
-    const del = await c.query('DELETE FROM transactions WHERE id = ANY($1) RETURNING id', [ids]);
+    // Soft delete — same rationale as single-row DELETE handler above.
+    const del = await c.query(
+      `UPDATE transactions
+          SET is_deleted = true, deleted_at = NOW(), deleted_by = $1
+        WHERE id = ANY($2)
+          AND is_deleted = false
+        RETURNING id`,
+      [req.user.id, ids]
+    );
     await c.query('COMMIT');
 
     res.json({
-      message: 'Bulk delete completed',
+      message: 'Bulk soft-delete completed (preserved in audit_logs)',
       deleted: del.rows.map((r) => r.id),
       requested: ids.length,
       not_found: ids.filter((id) => !found.some((f) => f.id === id)),

@@ -58,13 +58,13 @@ router.get('/summary', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'Charge Back')                  AS chargeback_count,
         COUNT(*)                                                         AS tx_count
       FROM transactions
-      WHERE date_received BETWEEN $1 AND $2
+      WHERE is_deleted = false AND date_received BETWEEN $1 AND $2
     `, params);
 
     const today = await pool.query(`
       SELECT COUNT(*) AS today_count,
              COALESCE(SUM(gross_amount), 0) AS today_gross
-        FROM transactions WHERE date_received = CURRENT_DATE
+        FROM transactions WHERE is_deleted = false AND date_received = CURRENT_DATE
     `);
 
     const dailyChart = await pool.query(`
@@ -72,7 +72,7 @@ router.get('/summary', async (req, res) => {
              COALESCE(SUM(gross_amount) FILTER (WHERE type = 'Received'), 0) AS gross,
              COALESCE(SUM(fee_amount)   FILTER (WHERE type = 'Received'), 0) AS revenue
         FROM transactions
-       WHERE date_received >= $1 AND date_received <= $2
+       WHERE is_deleted = false AND date_received >= $1 AND date_received <= $2
        GROUP BY date_received
        ORDER BY date_received
     `, params);
@@ -81,7 +81,7 @@ router.get('/summary', async (req, res) => {
       SELECT e.legal_name AS name,
              COALESCE(SUM(t.gross_amount) FILTER (WHERE t.type = 'Received'), 0) AS volume
         FROM entities e
-        LEFT JOIN transactions t ON t.entity_id = e.id AND t.date_received BETWEEN $1 AND $2
+        LEFT JOIN transactions t ON t.entity_id = e.id AND t.is_deleted = false AND t.date_received BETWEEN $1 AND $2
        GROUP BY e.id
        ORDER BY volume DESC
        LIMIT 8
@@ -91,7 +91,7 @@ router.get('/summary', async (req, res) => {
       SELECT COALESCE(payment_method, 'Other') AS method,
              COALESCE(SUM(gross_amount), 0) AS amount
         FROM transactions
-       WHERE date_received BETWEEN $1 AND $2 AND type = 'Received'
+       WHERE is_deleted = false AND date_received BETWEEN $1 AND $2 AND type = 'Received'
        GROUP BY payment_method
        ORDER BY amount DESC
     `, params);
