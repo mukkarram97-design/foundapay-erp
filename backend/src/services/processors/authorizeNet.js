@@ -442,6 +442,8 @@ async function chargeWithOpaqueData(params) {
         last4: (tx.accountNumber || '').slice(-4),
         message: tx.messages?.[0]?.description || 'Approved',
         responseCode: tx.responseCode,
+        avsResultCode: tx.avsResultCode || null,
+        cvvResultCode: tx.cvvResultCode || null,
       };
     }
     return {
@@ -449,6 +451,9 @@ async function chargeWithOpaqueData(params) {
       transactionId: tx?.transId || null,
       errorCode: tx?.errors?.[0]?.errorCode || messages?.message?.[0]?.code,
       message: tx?.errors?.[0]?.errorText || messages?.message?.[0]?.text || 'Transaction declined',
+      responseCode: tx?.responseCode || null,
+      avsResultCode: tx?.avsResultCode || null,
+      cvvResultCode: tx?.cvvResultCode || null,
     };
   } catch (e) {
     return { success: false, message: `Authorize.net error: ${e.message}` };
@@ -518,6 +523,7 @@ async function generatePaymentLink(params) {
     invoiceNumber: params.invoiceNumber || `INV-${Date.now()}`,
     customerEmail: params.email || '',
     brandName: params.brandName || process.env.AUTHNET_ENTITY || 'FoundaPay',
+    logoUrl: params.logoUrl || null,
     returnUrl: params.returnUrl || null,
     method,
     exp,

@@ -1,10 +1,42 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 const { pool } = require('../db');
 const { authRequired } = require('../middleware/auth');
 const { buildStatement } = require('../services/pdfReceipt');
+const { logAudit } = require('../services/audit');
 
 const router = express.Router();
 router.use(authRequired);
+
+// ── Logo upload setup ────────────────────────────────────────
+const LOGO_DIR = '/var/www/foundapay/uploads/logos';
+try { fs.mkdirSync(LOGO_DIR, { recursive: true }); } catch { /* dir exists or perms */ }
+
+const logoUpload = multer({
+  storage: multer.diskStorage({
+    destination: LOGO_DIR,
+    filename: (req, file, cb) => {
+      const ext = (path.extname(file.originalname).toLowerCase() || '.png').slice(0, 6);
+      cb(null, `client-${req.params.id}${ext}`);
+    },
+  }),
+  limits: { fileSize: 1024 * 1024 }, // 1 MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/svg+xml'];
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('Unsupported file type. PNG, JPG, WebP, or SVG only.'));
+    }
+    cb(null, true);
+  },
+});
+
+function canEditClientLogo(user, clientId) {
+  if (['super_admin', 'owner', 'admin'].includes(user.role)) return true;
+  if (user.role === 'client_user' && user.client_id === clientId) return true;
+  return false;
+}
 
 // Block client_user from listing all clients — they get /api/portal/me instead
 function blockClientUser(req, res, next) {
@@ -300,6 +332,85 @@ router.delete('/:id/cards/:cardId', blockClientUser, async (req, res) => {
       [req.params.id, req.params.cardId]
     );
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ━━━ Logo upload ━━━
+// POST /api/clients/:id/logo  multipart form: logo
+router.post('/:id/logo', (req, res, next) => {
+  if (!canEditClientLogo(req.user, req.params.id)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+}, logoUpload.single('logo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    // Defensive SVG script-tag scan (XSS guard)
+    if (req.file.mimetype === 'image/svg+xml') {
+      const content = fs.readFileSync(req.file.path, 'utf8');
+      if (/<\s*script/i.test(content) || /\bon\w+\s*=/i.test(content) || /javascript:/i.test(content)) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(400).json({ error: 'SVG contains scripts — rejected for security' });
+      }
+    }
+
+    const filename = path.basename(req.file.path);
+    const logoUrl = `/uploads/logos/${filename}`;
+
+    await pool.query(`
+      UPDATE clients
+         SET logo_url = $1, logo_uploaded_at = NOW(), logo_uploaded_by = $2, updated_at = NOW()
+       WHERE id = $3
+    `, [logoUrl, req.user.id, req.params.id]);
+
+    await logAudit({
+      action: 'client.logo_uploaded',
+      entityType: 'clients',
+      entityId: req.params.id,
+      userId: req.user.id,
+      metadata: { logo_url: logoUrl, mimetype: req.file.mimetype, size: req.file.size },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({ success: true, logo_url: logoUrl });
+  } catch (err) {
+    console.error('[clients/logo upload]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/:id/logo', async (req, res) => {
+  if (!canEditClientLogo(req.user, req.params.id)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try {
+    const cur = await pool.query('SELECT logo_url FROM clients WHERE id = $1', [req.params.id]);
+    const oldUrl = cur.rows[0]?.logo_url;
+    if (oldUrl) {
+      const oldPath = path.join(LOGO_DIR, path.basename(oldUrl));
+      try { fs.unlinkSync(oldPath); } catch { /* gone already */ }
+    }
+    await pool.query(`
+      UPDATE clients
+         SET logo_url = NULL, logo_uploaded_at = NULL, logo_uploaded_by = NULL, updated_at = NOW()
+       WHERE id = $1
+    `, [req.params.id]);
+
+    await logAudit({
+      action: 'client.logo_removed',
+      entityType: 'clients',
+      entityId: req.params.id,
+      userId: req.user.id,
+      metadata: { old_logo_url: oldUrl },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

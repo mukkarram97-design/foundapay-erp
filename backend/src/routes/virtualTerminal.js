@@ -11,7 +11,8 @@ const shopify = require('../services/processors/shopify');
 
 const router = express.Router();
 router.use(authRequired);
-router.use(requireRole('super_admin', 'owner', 'admin', 'finance_manager', 'operations_manager'));
+// 'client_user' is allowed but per-handler gates enforce client_terminal_access permissions + limits.
+router.use(requireRole('super_admin', 'owner', 'admin', 'finance_manager', 'operations_manager', 'client_user'));
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Authorize.net direct integration — Phase 4
@@ -180,6 +181,50 @@ router.post('/generate-link', async (req, res) => {
     const b = req.body || {};
     if (!b.amount) return res.status(400).json({ error: 'Amount required' });
 
+    // Client-user gating: must have client_terminal_access with can_generate_links=true,
+    // and the amount must respect per_transaction_limit + daily_limit.
+    if (req.user.role === 'client_user') {
+      const acc = await pool.query(
+        'SELECT * FROM client_terminal_access WHERE client_id = $1',
+        [req.user.client_id]
+      );
+      const ac = acc.rows[0];
+      if (!ac || !ac.can_generate_links) {
+        return res.status(403).json({ error: 'Payment link generation not enabled for your account' });
+      }
+      const amt = parseFloat(b.amount);
+      if (ac.per_transaction_limit && parseFloat(ac.per_transaction_limit) > 0 && amt > parseFloat(ac.per_transaction_limit)) {
+        return res.status(400).json({ error: `Per-transaction limit is $${parseFloat(ac.per_transaction_limit).toFixed(2)}` });
+      }
+      if (ac.daily_limit && parseFloat(ac.daily_limit) > 0) {
+        const todays = await pool.query(`
+          SELECT COALESCE(SUM(amount), 0) AS total FROM vt_transactions
+           WHERE client_id = $1 AND created_at >= CURRENT_DATE`,
+          [req.user.client_id]
+        );
+        const todayTotal = parseFloat(todays.rows[0].total);
+        if (todayTotal + amt > parseFloat(ac.daily_limit)) {
+          return res.status(400).json({ error: `Daily limit $${parseFloat(ac.daily_limit).toFixed(2)} would be exceeded (today so far: $${todayTotal.toFixed(2)})` });
+        }
+      }
+      // Force client_id + entity_id from the access record — don't let client override
+      b.client_id = req.user.client_id;
+      if (ac.entity_id) b.entity_id = ac.entity_id;
+      if (ac.merchant_id) b.merchant_id = ac.merchant_id;
+    }
+
+    // Resolve logo from entity > client (entity takes priority since it's the
+    // brand owner; client is a fallback for org-level branding).
+    let logoUrl = null;
+    if (b.entity_id) {
+      const e = await pool.query('SELECT logo_url FROM entities WHERE id = $1', [b.entity_id]);
+      logoUrl = e.rows[0]?.logo_url || null;
+    }
+    if (!logoUrl && b.client_id) {
+      const c = await pool.query('SELECT logo_url FROM clients WHERE id = $1', [b.client_id]);
+      logoUrl = c.rows[0]?.logo_url || null;
+    }
+
     // Always emits our /pay/:token wrapper. Upstream Authorize.net token is
     // regenerated lazily on each customer click — see GET /pay/:token in
     // routes/payments.js. Default TTL is 24h, configurable per-link.
@@ -189,6 +234,7 @@ router.post('/generate-link', async (req, res) => {
       invoiceNumber: b.invoiceNumber,
       email: b.customer_email,
       brandName: b.brand_name || process.env.AUTHNET_ENTITY || 'FoundaPay',
+      logoUrl, // resolved above; null = fall back to text brand on payment page
       expiryMinutes: parseInt(b.expiry_minutes || 1440, 10), // 24h default
       method: b.method || 'self_hosted', // 'self_hosted' renders our Accept.js page; 'auto' / 'hosted_redirect' use Authorize.net hosted page
       returnUrl: b.return_url || 'https://portal.foundapay.com',
@@ -222,11 +268,11 @@ router.post('/generate-link', async (req, res) => {
     if (b.client_id) {
       await pool.query(`
         INSERT INTO payment_link_requests
-          (client_id, amount, payment_method, entity_id, processor_link, status, description, created_by, link_generated_at)
-        VALUES ($1, $2, 'Debit/Credit Cards', $3, $4, 'link_generated', $5, $6, NOW())
+          (client_id, amount, payment_method, entity_id, processor_link, status, description, invoice_number, created_by, link_generated_at)
+        VALUES ($1, $2, 'Debit/Credit Cards', $3, $4, 'link_generated', $5, $6, $7, NOW())
       `, [
         b.client_id, parseFloat(b.amount).toFixed(2), b.entity_id || null,
-        result.hostedUrl, b.description || null, req.user.id,
+        result.hostedUrl, b.description || null, b.invoiceNumber || null, req.user.id,
       ]);
     }
 

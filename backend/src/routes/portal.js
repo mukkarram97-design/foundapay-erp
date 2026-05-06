@@ -110,4 +110,18 @@ router.get('/me', async (req, res) => {
   }
 });
 
+// GET /api/portal/terminal-access — does this client have VT access?
+router.get('/terminal-access', async (req, res) => {
+  try {
+    if (!req.user.client_id) return res.json({ access: false });
+    const r = await pool.query(
+      'SELECT * FROM client_terminal_access WHERE client_id = $1',
+      [req.user.client_id]
+    );
+    res.json({ access: r.rows[0] || false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

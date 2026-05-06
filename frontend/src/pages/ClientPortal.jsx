@@ -11,7 +11,7 @@ import ThemeToggle from '../components/ui/ThemeToggle';
 import { toast } from '../store/toast';
 import { downloadReceipt, downloadStatement } from '../utils/downloadReceipt';
 
-const TABS = [
+const BASE_TABS = [
   { id: 'transactions', label: 'Transactions' },
   { id: 'payment_links', label: 'Payment Links' },
   { id: 'reserves',     label: 'Reserves' },
@@ -24,13 +24,24 @@ export default function ClientPortal() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [data, setData] = useState(null);
+  const [terminalAccess, setTerminalAccess] = useState(null); // null = not loaded, false = no access, object = access record
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState('transactions');
   const [requestOpen, setRequestOpen] = useState(false);
 
+  // Show Terminal tab only if the client has access enabled.
+  const TABS = terminalAccess
+    ? [...BASE_TABS, { id: 'terminal', label: '⚡ Terminal' }]
+    : BASE_TABS;
+
   async function load() {
     try { setData(await api.get('/api/portal/me')); }
     catch (e) { setErr(e.message); }
+    // Probe terminal access — soft check; if endpoint 403s/404s, hide the tab.
+    try {
+      const ta = await api.get('/api/portal/terminal-access');
+      setTerminalAccess(ta?.access || false);
+    } catch { setTerminalAccess(false); }
   }
   useEffect(() => { load(); }, []);
 
@@ -251,6 +262,10 @@ export default function ClientPortal() {
             {tab === 'statement' && (
               <StatementTab clientId={data.client.id} clientName={data.client.name} />
             )}
+
+            {tab === 'terminal' && terminalAccess && (
+              <TerminalTab access={terminalAccess} clientName={data.client.name} />
+            )}
           </>
         )}
       </div>
@@ -374,6 +389,135 @@ function Stat({ label, value, tone = 'default' }) {
     <div style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
       <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)' }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 2, color: c[tone] }}>{value}</div>
+    </div>
+  );
+}
+
+// ━━━ Terminal tab — simplified self-service link generator ━━━
+function TerminalTab({ access, clientName }) {
+  const [form, setForm] = React.useState({ amount: '', description: '', customer_email: '', expiry_minutes: 1440 });
+  const [result, setResult] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  async function generate() {
+    if (!form.amount || parseFloat(form.amount) <= 0) return toast.error('Enter a valid amount');
+    setBusy(true); setResult(null);
+    try {
+      const r = await api.post('/api/vt/generate-link', {
+        amount: parseFloat(form.amount),
+        description: form.description,
+        customer_email: form.customer_email || undefined,
+        invoiceNumber: `INV-${Date.now()}`,
+        expiry_minutes: parseInt(form.expiry_minutes, 10),
+        method: 'self_hosted',
+      });
+      setResult(r);
+      toast.success('Payment link generated');
+    } catch (e) { toast.error(e.message); }
+    finally { setBusy(false); }
+  }
+
+  function copyUrl() {
+    if (!result?.hostedUrl) return;
+    navigator.clipboard.writeText(result.hostedUrl);
+    toast.success('Link copied');
+  }
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div className="lg:col-span-2 space-y-3">
+        <Card className="p-5">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)' }}>
+            Generate Payment Link
+          </div>
+          <h3 style={{ fontSize: 18, fontWeight: 600, marginTop: 4 }}>Charge a customer for {clientName}</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+            <div>
+              <Label>Amount (USD)</Label>
+              <Input
+                type="number" step="0.01" placeholder="100.00"
+                value={form.amount}
+                onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))}
+              />
+            </div>
+            <div>
+              <Label>Customer email (optional, for receipt)</Label>
+              <Input
+                type="email" placeholder="customer@example.com"
+                value={form.customer_email}
+                onChange={(e) => setForm((f) => ({ ...f, customer_email: e.target.value }))}
+              />
+            </div>
+            <div className="md:col-span-2">
+              <Label>Description</Label>
+              <Input
+                placeholder="Invoice #1234, March consulting, etc."
+                value={form.description}
+                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+              />
+            </div>
+            <div>
+              <Label>Link expires</Label>
+              <Select value={form.expiry_minutes} onChange={(e) => setForm((f) => ({ ...f, expiry_minutes: e.target.value }))}>
+                <option value="60">1 hour</option>
+                <option value="1440">24 hours</option>
+                <option value="10080">7 days</option>
+              </Select>
+            </div>
+          </div>
+          <div className="mt-4">
+            <Button onClick={generate} disabled={busy} size="lg">
+              {busy ? 'Generating…' : `Generate link → $${form.amount || '0.00'}`}
+            </Button>
+          </div>
+          {access.per_transaction_limit > 0 && (
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 12 }}>
+              Per-transaction limit: ${parseFloat(access.per_transaction_limit).toFixed(2)}
+              {access.daily_limit > 0 && ` · Daily limit: $${parseFloat(access.daily_limit).toFixed(2)}`}
+            </div>
+          )}
+        </Card>
+
+        {result?.success && (
+          <Card className="p-5" style={{ borderLeft: '3px solid var(--success)' }}>
+            <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Link generated</div>
+            <h3 style={{ fontSize: 16, fontWeight: 600, marginTop: 4, marginBottom: 12 }}>
+              Send this URL to your customer
+            </h3>
+            {result.qrCode && (
+              <div className="mb-3" style={{ display: 'flex', justifyContent: 'center' }}>
+                <img src={result.qrCode} alt="QR" style={{ width: 180, height: 180, borderRadius: 10, border: '1px solid var(--border)' }} />
+              </div>
+            )}
+            <div style={{
+              padding: '8px 10px', borderRadius: 8, background: 'var(--bg-tertiary)',
+              fontFamily: 'ui-monospace, monospace', fontSize: 11, wordBreak: 'break-all', marginBottom: 8,
+            }}>{result.hostedUrl}</div>
+            <div className="flex gap-2">
+              <Button variant="secondary" onClick={copyUrl}>Copy link</Button>
+              <Button variant="secondary" onClick={() => window.open(result.hostedUrl, '_blank')}>Open page</Button>
+            </div>
+          </Card>
+        )}
+      </div>
+
+      <div>
+        <Card className="p-5">
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>
+            How this works
+          </div>
+          <ol style={{ fontSize: 13, lineHeight: 1.6, marginTop: 8, paddingLeft: 18, color: 'var(--text-secondary)' }}>
+            <li>Enter the amount and description</li>
+            <li>Click "Generate link"</li>
+            <li>Copy the URL or share the QR code with your customer</li>
+            <li>Customer pays securely on FoundaPay's page</li>
+            <li>Funds settle to {clientName} per your normal cycle</li>
+          </ol>
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 16, padding: 10, background: 'var(--bg-tertiary)', borderRadius: 8 }}>
+            🔒 Card data is tokenized via Authorize.net Accept.js — never stored on FoundaPay or your servers.
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }

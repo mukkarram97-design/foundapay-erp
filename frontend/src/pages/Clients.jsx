@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../utils/api';
 import {
   Card, Button, Input, Select, Label, PageHeader, Modal, Alert, Badge,
   Table, Thead, Th, Tr, Td, money, pct,
 } from '../components/ui';
+import { toast } from '../store/toast';
 
 const VIS_FIELDS = [
   ['show_gross_amount', 'Gross amount'],
@@ -53,6 +54,7 @@ export default function Clients() {
         <Table>
           <Thead>
             <Tr>
+              <Th>Logo</Th>
               <Th>Name</Th>
               <Th className="text-right">Card</Th><Th className="text-right">Wire</Th>
               <Th className="text-right">ACH</Th><Th className="text-right">Zelle</Th><Th className="text-right">Cheque</Th>
@@ -64,6 +66,11 @@ export default function Clients() {
           <tbody>
             {rows.map(c => (
               <Tr key={c.id}>
+                <Td>
+                  {c.logo_url
+                    ? <img src={c.logo_url} alt={c.name} style={{ height: 28, maxWidth: 80, objectFit: 'contain' }} />
+                    : <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>—</span>}
+                </Td>
                 <Td className="font-medium">{c.name}</Td>
                 <Td className="text-right font-mono">{pct(c.card_pct)}</Td>
                 <Td className="text-right font-mono">{pct(c.wire_pct)}</Td>
@@ -124,6 +131,11 @@ function ClientForm({ client, onClose, onSaved }) {
       footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button></>}
     >
       {err && <Alert tone="error" className="mb-3">{err}</Alert>}
+      {client?.id && (
+        <div className="mb-4">
+          <BrandingSection client={client} onChanged={(newUrl) => { client.logo_url = newUrl; setForm(f => ({ ...f })); }} />
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <div><Label>Name</Label><Input value={form.name || ''} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} required /></div>
         <div><Label>Status</Label><Select value={form.status} onChange={(e) => setForm(f => ({ ...f, status: e.target.value }))}><option>active</option><option>inactive</option><option>on_hold</option><option>risk</option></Select></div>
@@ -220,5 +232,83 @@ function VisibilityModal({ client, cards, onClose, onSaved }) {
         </>
       )}
     </Modal>
+  );
+}
+
+
+// ━━━ Branding (logo upload) section ━━━
+function BrandingSection({ client, onChanged }) {
+  const [logoUrl, setLogoUrl] = React.useState(client.logo_url);
+  const [busy, setBusy] = React.useState(false);
+  const fileRef = React.useRef(null);
+
+  async function upload(file) {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("logo", file);
+      const token = localStorage.getItem("foundapay_token");
+      const res = await fetch(`/api/clients/${client.id}/logo`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      setLogoUrl(data.logo_url);
+      onChanged?.(data.logo_url);
+      toast.success("Logo uploaded");
+    } catch (e) { toast.error(e.message); }
+    finally { setBusy(false); }
+  }
+
+  async function remove() {
+    if (!window.confirm("Remove logo?")) return;
+    setBusy(true);
+    try {
+      await api.delete(`/api/clients/${client.id}/logo`);
+      setLogoUrl(null);
+      onChanged?.(null);
+      toast.success("Logo removed");
+    } catch (e) { toast.error(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Card className="p-4" style={{ background: "var(--bg-tertiary)" }}>
+      <Label>Branding (appears on payment pages + receipts)</Label>
+      <div className="flex items-center gap-3 mt-2">
+        <div style={{
+          width: 120, height: 60, border: "1px dashed var(--border)",
+          borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center",
+          background: "var(--bg-primary)", overflow: "hidden",
+        }}>
+          {logoUrl
+            ? <img src={logoUrl} alt="logo" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+            : <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>No logo</span>}
+        </div>
+        <div className="flex flex-col gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/svg+xml"
+            style={{ display: "none" }}
+            onChange={(e) => upload(e.target.files?.[0])}
+          />
+          <Button variant="secondary" disabled={busy} onClick={() => fileRef.current?.click()}>
+            {logoUrl ? "Replace logo" : "Upload logo"}
+          </Button>
+          {logoUrl && (
+            <Button variant="ghost" disabled={busy} onClick={remove}>
+              Remove
+            </Button>
+          )}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 8 }}>
+        PNG, JPG, WebP, or SVG. Max 1 MB. Recommended ~400×100px.
+      </div>
+    </Card>
   );
 }

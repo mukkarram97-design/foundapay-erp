@@ -17,6 +17,8 @@
 const express = require('express');
 const { pool } = require('../db');
 const authNet = require('../services/processors/authorizeNet');
+const { recordTransaction } = require('../services/transactions');
+const { logAudit } = require('../services/audit');
 
 const router = express.Router();
 
@@ -175,7 +177,10 @@ router.get('/pay/:token', async (req, res) => {
 </head>
 <body>
   <div class="card" id="card">
-    <div class="brand">${esc(payload.brandName)}</div>
+    ${payload.logoUrl
+      ? `<img src="${esc(payload.logoUrl)}" alt="${esc(payload.brandName)}" style="max-height:48px;max-width:200px;object-fit:contain;margin-bottom:12px"/>`
+      : `<div class="brand">${esc(payload.brandName)}</div>`
+    }
     <div class="label">Amount due</div>
     <div class="amount">${esc(amountFmt)}</div>
     <div class="meta">${esc(payload.description || 'Payment')}</div>
@@ -265,83 +270,317 @@ router.get('/pay/:token', async (req, res) => {
 });
 
 // ━━━ POST /api/pay/process — charge using Accept.js nonce ━━━
+//
+// Phase 1 master-plan compliant:
+//   - Charge BEFORE BEGIN (cannot roll back a real Authorize.net charge)
+//   - SELECT FOR UPDATE on vt_transactions for concurrent-submission safety
+//   - Idempotency: status='success' on entry → HTTP 410 + existing tx details
+//   - Dual-write: master ledger (transactions) + vt_transactions UPDATE (not duplicate INSERT)
+//   - payment_link_requests update by invoice_number on both success and failure
+//   - 4 audit events: charge_attempted, charge_succeeded, charge_failed, charge_db_write_failed
 router.post('/api/pay/process', express.json(), async (req, res) => {
+  const { token, dataDescriptor, dataValue, customer } = req.body || {};
+  if (!token || !dataDescriptor || !dataValue) {
+    return res.status(400).json({ success: false, message: 'Missing token or payment data' });
+  }
+
+  // ━━━ 1. Verify HMAC token (server-truth amount + invoice) ━━━
+  let payload;
   try {
-    const { token, dataDescriptor, dataValue, customer } = req.body || {};
-    if (!token || !dataDescriptor || !dataValue) {
-      return res.status(400).json({ success: false, message: 'Missing token or payment data' });
+    payload = authNet.verifyToken(token);
+  } catch (e) {
+    if (e.code === 'EXPIRED') {
+      return res.status(410).json({ success: false, message: 'This payment link has expired.' });
     }
+    return res.status(400).json({ success: false, message: 'Invalid payment link' });
+  }
+  const amount = parseFloat(payload.amount);
+  if (!isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ success: false, message: 'Invalid amount on token' });
+  }
+  const ipAddress = req.ip;
+  const userAgent = req.headers['user-agent'];
 
-    let payload;
-    try {
-      payload = authNet.verifyToken(token);
-    } catch (e) {
-      if (e.code === 'EXPIRED') {
-        return res.status(410).json({ success: false, message: 'This payment link has expired.' });
-      }
-      return res.status(400).json({ success: false, message: 'Invalid payment link' });
-    }
+  // ━━━ 2. Audit: charge attempt (BEFORE Authorize.net call) ━━━
+  await logAudit({
+    action: 'payment_link.charge_attempted',
+    entityType: 'payment_link_token',
+    entityId: payload.invoiceNumber,
+    metadata: { amount, brand: payload.brandName, email: payload.customerEmail },
+    ipAddress, userAgent,
+  });
 
-    // Server-truth amount from token
-    const amount = parseFloat(payload.amount);
-    if (!isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid amount on token' });
-    }
+  // ━━━ 3. Idempotency check — DB lookup BEFORE charging ━━━
+  // If the originating vt_transactions row is already 'success', short-circuit
+  // with HTTP 410 — NO Authorize.net call, NO duplicate transactions row.
+  const existing = await pool.query(`
+    SELECT vt.id AS vt_id, vt.status AS vt_status, vt.transaction_id,
+           vt.client_id, vt.entity_id, vt.invoice_number,
+           vt.processor_transaction_id, vt.processor_auth_code, vt.card_last4
+      FROM vt_transactions vt
+     WHERE vt.hosted_link_token = $1
+       AND vt.charge_type = 'hosted_link'
+     ORDER BY vt.created_at ASC
+     LIMIT 1
+  `, [token]);
+  const originating = existing.rows[0] || null;
 
-    const result = await authNet.chargeWithOpaqueData({
-      amount,
-      dataDescriptor,
-      dataValue,
-      firstName: customer?.firstName || '',
-      lastName:  customer?.lastName || '',
-      email:     customer?.email || payload.customerEmail || '',
-      description: payload.description,
-      invoiceNumber: payload.invoiceNumber,
+  if (originating && originating.vt_status === 'success') {
+    return res.status(410).json({
+      success: false,
+      alreadyPaid: true,
+      message: 'This payment has already been completed.',
+      transactionId: originating.processor_transaction_id,
+      authCode: originating.processor_auth_code,
+      last4: originating.card_last4,
+      amount: amount.toFixed(2),
     });
+  }
 
-    // Persist VT row regardless of success — for audit
-    try {
-      await pool.query(`
-        INSERT INTO vt_transactions
-          (processor, processor_transaction_id, processor_auth_code,
-           processor_response_code, processor_response_text,
-           card_last4, card_type, card_holder_name, customer_email,
-           amount, charge_type, status, hosted_link_token,
-           invoice_number, description, brand_name)
-        VALUES ('authorize_net',$1,$2,$3,$4,$5,$6,$7,$8,$9,'hosted_link',$10,$11,$12,$13,$14)
-      `, [
-        result.transactionId || null, result.authCode || null,
-        result.responseCode || null,
-        result.success ? 'Approved (self-hosted)' : (result.message || 'Declined'),
-        result.last4 || null,
-        result.accountType || null,
-        `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim() || null,
-        customer?.email || payload.customerEmail || null,
-        amount.toFixed(2),
-        result.success ? 'success' : 'declined',
-        token.slice(0, 200),
-        payload.invoiceNumber, payload.description, payload.brandName,
-      ]);
-    } catch (dbErr) {
-      console.warn('[pay/process] vt_transactions insert failed:', dbErr.message);
+  // ━━━ 4. Charge Authorize.net — BEFORE BEGIN ━━━
+  // Cannot roll back a real charge. We do NOT hold a DB row lock during
+  // the 3rd-party network call.
+  const result = await authNet.chargeWithOpaqueData({
+    amount, dataDescriptor, dataValue,
+    firstName: customer?.firstName || '',
+    lastName:  customer?.lastName  || '',
+    email:     customer?.email || payload.customerEmail || '',
+    description: payload.description,
+    invoiceNumber: payload.invoiceNumber,
+  });
+
+  // ━━━ 5. Persist (transaction-bracketed) ━━━
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+
+    // 5a. SELECT FOR UPDATE — lock the originating vt_transactions row.
+    let lockedVt = null;
+    if (originating) {
+      const r = await c.query(
+        `SELECT id, status, client_id, entity_id, invoice_number
+           FROM vt_transactions
+          WHERE id = $1
+          FOR UPDATE`,
+        [originating.vt_id]
+      );
+      lockedVt = r.rows[0];
+      // Re-check under lock — another submission may have won the race.
+      if (lockedVt && lockedVt.status === 'success') {
+        await c.query('ROLLBACK');
+        return res.status(410).json({
+          success: false,
+          alreadyPaid: true,
+          message: 'This payment has already been completed.',
+          amount: amount.toFixed(2),
+        });
+      }
     }
 
-    if (!result.success) {
+    const customerName = `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim() || null;
+
+    if (result.success) {
+      // ━━━ 5b SUCCESS BRANCH ━━━
+      const tx = await recordTransaction(c, {
+        amount,
+        type: 'Received',
+        clientId: lockedVt?.client_id || null,
+        counterpartyType: 'Client',
+        counterpartyName: customerName || (customer?.email || 'Anonymous payer'),
+        entityId: lockedVt?.entity_id || null,
+        paymentMethod: 'Debit/Credit Cards',
+        externalTxnId: result.transactionId,
+        processorReference: result.authCode,
+        cardLast4: result.last4,
+        cardBrand: result.accountType,
+        avsResult: result.avsResultCode || null,
+        cvvResult: result.cvvResultCode || null,
+        customerEmail: customer?.email || payload.customerEmail || null,
+        customerName,
+        status: 'Completed',
+        source: 'payment_link',
+        notes: `Payment link charge | Inv: ${payload.invoiceNumber} | ${payload.description || ''}`.slice(0, 500),
+      });
+
+      // UPDATE existing pending vt_transactions row (no duplicate INSERT)
+      if (lockedVt) {
+        await c.query(`
+          UPDATE vt_transactions
+             SET status = 'success',
+                 processor_transaction_id = $1, processor_auth_code = $2,
+                 processor_response_code = $3, processor_response_text = $4,
+                 card_last4 = $5, card_type = $6, card_holder_name = $7,
+                 customer_email = $8, transaction_id = $9,
+                 updated_at = NOW()
+           WHERE id = $10
+        `, [
+          result.transactionId, result.authCode, result.responseCode,
+          'Approved (self-hosted)',
+          result.last4, result.accountType, customerName,
+          customer?.email || payload.customerEmail || null,
+          tx.id, lockedVt.id,
+        ]);
+      } else {
+        // Legacy/orphan token — insert fresh vt_transactions row for audit
+        await c.query(`
+          INSERT INTO vt_transactions
+            (processor, processor_transaction_id, processor_auth_code,
+             processor_response_code, processor_response_text,
+             card_last4, card_type, card_holder_name, customer_email,
+             amount, charge_type, status, hosted_link_token,
+             invoice_number, description, brand_name, transaction_id)
+          VALUES ('authorize_net',$1,$2,$3,$4,$5,$6,$7,$8,$9,
+                  'hosted_link','success',$10,$11,$12,$13,$14)
+        `, [
+          result.transactionId, result.authCode, result.responseCode,
+          'Approved (self-hosted, orphan token)',
+          result.last4, result.accountType, customerName,
+          customer?.email || payload.customerEmail || null,
+          amount.toFixed(2), token,
+          payload.invoiceNumber, payload.description, payload.brandName,
+          tx.id,
+        ]);
+      }
+
+      // UPDATE payment_link_requests by invoice_number
+      if (lockedVt?.invoice_number) {
+        await c.query(`
+          UPDATE payment_link_requests
+             SET status = 'paid', transaction_id = $1, paid_at = NOW(),
+                 attempts = COALESCE(attempts, 0) + 1
+           WHERE invoice_number = $2
+             AND status NOT IN ('paid','cancelled','refunded')
+        `, [tx.id, lockedVt.invoice_number]);
+      }
+
+      // COMMIT — if THIS fails after the real charge: CRITICAL alert
+      try {
+        await c.query('COMMIT');
+      } catch (commitErr) {
+        await logAudit({
+          action: 'payment_link.charge_db_write_failed',
+          entityType: 'payment_link_token',
+          entityId: payload.invoiceNumber,
+          metadata: {
+            critical: true,
+            authnet_transaction_id: result.transactionId,
+            authnet_auth_code: result.authCode,
+            amount,
+            invoice_number: payload.invoiceNumber,
+            customer_email: customer?.email || payload.customerEmail || null,
+            commit_error: commitErr.message,
+          },
+          ipAddress, userAgent,
+        });
+        console.error('[CRITICAL pay/process] commit failed after real charge', {
+          authnet_tx: result.transactionId, amount, invoice: payload.invoiceNumber,
+        });
+        throw commitErr;
+      }
+
+      // Success audit (after COMMIT)
+      await logAudit({
+        action: 'payment_link.charge_succeeded',
+        entityType: 'transactions',
+        entityId: tx.id,
+        metadata: {
+          authnet_transaction_id: result.transactionId,
+          amount, last4: result.last4, brand: result.accountType,
+          payment_link_invoice: payload.invoiceNumber,
+        },
+        ipAddress, userAgent,
+      });
+
+      return res.json({
+        success: true,
+        transactionId: result.transactionId,
+        authCode: result.authCode,
+        last4: result.last4,
+        amount: amount.toFixed(2),
+        amountFmt: fmtMoney(amount),
+        message: result.message,
+      });
+    } else {
+      // ━━━ 5c FAILURE BRANCH ━━━
+      const tx = await recordTransaction(c, {
+        amount,
+        type: 'Received',
+        clientId: lockedVt?.client_id || null,
+        counterpartyType: 'Client',
+        counterpartyName: customerName || (customer?.email || 'Anonymous payer'),
+        entityId: lockedVt?.entity_id || null,
+        paymentMethod: 'Debit/Credit Cards',
+        externalTxnId: result.transactionId || null,
+        cardLast4: null,
+        cardBrand: null,
+        avsResult: result.avsResultCode || null,
+        cvvResult: result.cvvResultCode || null,
+        customerEmail: customer?.email || payload.customerEmail || null,
+        customerName,
+        status: 'Failed',
+        source: 'payment_link',
+        failureCode: result.errorCode || 'DECLINED',
+        failureMessage: result.message || 'Transaction declined',
+        failureResponseRaw: {
+          errorCode: result.errorCode,
+          message: result.message,
+          responseCode: result.responseCode,
+          transactionId: result.transactionId,
+          avsResultCode: result.avsResultCode,
+          cvvResultCode: result.cvvResultCode,
+        },
+        notes: `Failed payment link charge | Inv: ${payload.invoiceNumber}`.slice(0, 500),
+      });
+
+      // Update originating vt_transactions to 'declined'
+      if (lockedVt) {
+        await c.query(`
+          UPDATE vt_transactions
+             SET status = 'declined',
+                 processor_response_text = $1,
+                 transaction_id = $2,
+                 updated_at = NOW()
+           WHERE id = $3
+        `, [result.message || 'Declined', tx.id, lockedVt.id]);
+      }
+
+      // Bump plr.attempts + set last_error (link still usable for retry)
+      if (lockedVt?.invoice_number) {
+        await c.query(`
+          UPDATE payment_link_requests
+             SET attempts = COALESCE(attempts, 0) + 1,
+                 last_error = $1
+           WHERE invoice_number = $2
+             AND status NOT IN ('paid','cancelled','refunded')
+        `, [
+          `${result.errorCode || 'DECLINED'}: ${result.message || 'Transaction declined'}`,
+          lockedVt.invoice_number,
+        ]);
+      }
+
+      await c.query('COMMIT');
+
+      await logAudit({
+        action: 'payment_link.charge_failed',
+        entityType: 'transactions',
+        entityId: tx.id,
+        metadata: {
+          code: result.errorCode || 'DECLINED',
+          message: result.message,
+          amount,
+          payment_link_invoice: payload.invoiceNumber,
+        },
+        ipAddress, userAgent,
+      });
+
       return res.json({ success: false, message: result.message || 'Payment declined' });
     }
-
-    res.json({
-      success: true,
-      transactionId: result.transactionId,
-      authCode: result.authCode,
-      last4: result.last4,
-      amount: amount.toFixed(2),
-      amountFmt: fmtMoney(amount),
-      message: result.message,
-    });
   } catch (err) {
+    try { await c.query('ROLLBACK'); } catch { /* swallowed */ }
     console.error('[pay/process]', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    return res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    c.release();
   }
 });
 
