@@ -330,7 +330,7 @@ router.get('/transactions/:id/status', async (req, res) => {
       if (details) {
         const map = { '1': 'success', '2': 'declined', '3': 'error', '4': 'held' };
         const newStatus = map[details.responseCode] || vt.status;
-        await pool.query('UPDATE vt_transactions SET status = $1, updated_at = NOW() WHERE id = $2',
+        await pool.query('UPDATE vt_transactions SET status = $1 WHERE id = $2',
           [newStatus, vt.id]);
         return res.json({ status: newStatus, details });
       }
@@ -350,7 +350,7 @@ router.post('/transactions/:id/void', requireRole('super_admin'), async (req, re
     if (!vt.processor_transaction_id) return res.status(400).json({ error: 'No processor transaction to void' });
     const result = await authNet.voidTransaction(vt.processor_transaction_id);
     if (result.success) {
-      await pool.query('UPDATE vt_transactions SET status = $1, updated_at = NOW() WHERE id = $2',
+      await pool.query('UPDATE vt_transactions SET status = $1 WHERE id = $2',
         ['voided', vt.id]);
     }
     res.json(result);
@@ -371,7 +371,7 @@ router.post('/transactions/:id/refund', requireRole('super_admin'), async (req, 
       cardLast4: vt.card_last4,
     });
     if (result.success) {
-      await pool.query('UPDATE vt_transactions SET status = $1, updated_at = NOW() WHERE id = $2',
+      await pool.query('UPDATE vt_transactions SET status = $1 WHERE id = $2',
         ['refunded', vt.id]);
     }
     res.json(result);

@@ -56,6 +56,48 @@ h1{color:#dc2626;margin:0;font-size:22px}p{color:#6b7280;margin-top:12px}
 <p>This payment link is invalid or has been revoked.</p></div></body></html>`;
 }
 
+// In-memory dedup: don't log >1 view per IP+invoice within 60 seconds.
+// Survives one process at a time; pm2 restart clears it (acceptable — at
+// worst a single duplicate audit row across a restart boundary).
+const VIEW_DEDUP_TTL_MS = 60_000;
+const viewDedup = new Map();
+function shouldLogView(ip, invoiceNumber) {
+  const key = `${ip || 'unknown'}:${invoiceNumber || 'unknown'}`;
+  const now = Date.now();
+  const exp = viewDedup.get(key);
+  if (exp && exp > now) return false;
+  viewDedup.set(key, now + VIEW_DEDUP_TTL_MS);
+  if (viewDedup.size > 5000) {
+    for (const [k, e] of viewDedup) if (e < now) viewDedup.delete(k);
+  }
+  return true;
+}
+
+async function trackView(payload, ip, userAgent) {
+  if (!payload?.invoiceNumber) return;
+  if (!shouldLogView(ip, payload.invoiceNumber)) return;
+  try {
+    // bump view_count on every (deduped) view, set viewed_at on first view
+    await pool.query(`
+      UPDATE payment_link_requests
+         SET view_count = COALESCE(view_count, 0) + 1,
+             viewed_at = COALESCE(viewed_at, NOW())
+       WHERE invoice_number = $1
+    `, [payload.invoiceNumber]);
+
+    await logAudit({
+      action: 'payment_link.viewed',
+      entityType: 'payment_link_token',
+      entityId: payload.invoiceNumber,
+      metadata: { amount: payload.amount, brand: payload.brandName },
+      ipAddress: ip,
+      userAgent,
+    });
+  } catch (e) {
+    console.warn('[trackView] failed:', e.message);
+  }
+}
+
 function processorErrorHtml(brandName, errorText, errorCode) {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Payment temporarily unavailable</title>
 <style>body{font-family:-apple-system,sans-serif;background:#f8f7ff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
@@ -129,6 +171,9 @@ router.get('/pay/:token', async (req, res) => {
   }
 
   // ━━━ Self-hosted Accept.js path ━━━
+  // Track customer view (fire-and-forget; render must not block on DB)
+  trackView(payload, req.ip, req.headers['user-agent']).catch(() => {});
+
   const apiLoginId = process.env.AUTHNET_LOGIN_ID || '';
   const publicClientKey = process.env.AUTHNET_PUBLIC_CLIENT_KEY || '';
   const acceptUiSrc = process.env.AUTHNET_SANDBOX === 'true'
@@ -403,6 +448,7 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
       });
 
       // UPDATE existing pending vt_transactions row (no duplicate INSERT)
+      // Note: vt_transactions has no updated_at column on prod, so don't touch it.
       if (lockedVt) {
         await c.query(`
           UPDATE vt_transactions
@@ -410,8 +456,7 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
                  processor_transaction_id = $1, processor_auth_code = $2,
                  processor_response_code = $3, processor_response_text = $4,
                  card_last4 = $5, card_type = $6, card_holder_name = $7,
-                 customer_email = $8, transaction_id = $9,
-                 updated_at = NOW()
+                 customer_email = $8, transaction_id = $9
            WHERE id = $10
         `, [
           result.transactionId, result.authCode, result.responseCode,
@@ -538,8 +583,7 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
           UPDATE vt_transactions
              SET status = 'declined',
                  processor_response_text = $1,
-                 transaction_id = $2,
-                 updated_at = NOW()
+                 transaction_id = $2
            WHERE id = $3
         `, [result.message || 'Declined', tx.id, lockedVt.id]);
       }
@@ -561,7 +605,7 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
       await c.query('COMMIT');
 
       await logAudit({
-        action: 'payment_link.charge_failed',
+        action: 'payment_link.charge_declined',
         entityType: 'transactions',
         entityId: tx.id,
         metadata: {
@@ -577,7 +621,35 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
     }
   } catch (err) {
     try { await c.query('ROLLBACK'); } catch { /* swallowed */ }
-    console.error('[pay/process]', err);
+    // CRITICAL: if Authnet already succeeded but DB write failed, log enough
+    // info to manually reconcile. This fires for any error after the charge,
+    // not just COMMIT failures.
+    if (result?.success) {
+      await logAudit({
+        action: 'payment_link.charge_db_write_failed',
+        entityType: 'payment_link_token',
+        entityId: payload.invoiceNumber,
+        metadata: {
+          critical: true,
+          authnet_transaction_id: result.transactionId,
+          authnet_auth_code: result.authCode,
+          last4: result.last4,
+          card_brand: result.accountType,
+          amount,
+          invoice_number: payload.invoiceNumber,
+          customer_email: customer?.email || payload.customerEmail || null,
+          db_error: err.message,
+          error_code: err.code,
+        },
+        ipAddress, userAgent,
+      });
+      console.error('[CRITICAL pay/process] charge succeeded but DB write failed', {
+        authnet_tx: result.transactionId, auth_code: result.authCode,
+        amount, invoice: payload.invoiceNumber, err: err.message,
+      });
+    } else {
+      console.error('[pay/process]', err);
+    }
     return res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     c.release();
