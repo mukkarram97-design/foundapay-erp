@@ -18,8 +18,66 @@ const { pool } = require('../db');
 const { authRequired } = require('../middleware/auth');
 const { logAudit } = require('../services/audit');
 const wise = require('../services/wise');
+const remittance = require('../services/remittance');
 
 const router = express.Router();
+
+// GET /api/wise/providers — list all available remittance providers + status
+router.get('/providers', authRequired, (req, res) => {
+  res.json({ providers: remittance.list() });
+});
+
+// POST /api/wise/manual — record a manual wire transfer (no Wise API call).
+// Body: { recipientName, recipientBank, recipientAccount, recipientCountry,
+//         sourceCurrency, targetCurrency, sourceAmount, targetAmount,
+//         exchangeRate, providerFee, providerReference, reference, purpose,
+//         payrollItemId? }
+router.post('/manual', authRequired, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.sourceAmount || !b.recipientName) {
+      return res.status(400).json({ error: 'sourceAmount and recipientName required' });
+    }
+    const r = await pool.query(`
+      INSERT INTO remittances
+        (provider, provider_reference, provider_fee, provider_exchange_rate,
+         source_currency, target_currency, source_amount, target_amount,
+         exchange_rate, wise_fee,
+         recipient_name, recipient_bank, recipient_account, recipient_country,
+         purpose, reference,
+         payroll_item_id, payout_id, expense_id,
+         status, created_by)
+      VALUES ('manual', $1, $2, $3,
+              $4, $5, $6, $7,
+              $8, NULL,
+              $9, $10, $11, $12,
+              $13, $14,
+              $15, $16, $17,
+              'transfer_created', $18)
+      RETURNING *
+    `, [
+      b.providerReference || null, b.providerFee || null, b.exchangeRate || null,
+      b.sourceCurrency || 'USD', b.targetCurrency || 'USD',
+      b.sourceAmount, b.targetAmount || b.sourceAmount,
+      b.exchangeRate || null,
+      b.recipientName, b.recipientBank || null, b.recipientAccount || null, b.recipientCountry || null,
+      b.purpose || 'other', b.reference || null,
+      b.payrollItemId || null, b.payoutId || null, b.expenseId || null,
+      req.user.id,
+    ]);
+
+    await logAudit({
+      action: 'remittance.manual_recorded', entityType: 'remittances', entityId: r.rows[0].id,
+      userId: req.user.id,
+      metadata: { amount: b.sourceAmount, currency: b.sourceCurrency, recipient: b.recipientName, reference: b.providerReference || b.reference },
+      ipAddress: req.ip, userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json({ remittance: r.rows[0] });
+  } catch (err) {
+    console.error('[remittance manual]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 router.use(authRequired);
 router.use((req, res, next) => {
   if (req.user.role === 'client_user') return res.status(403).json({ error: 'Forbidden' });

@@ -25,11 +25,14 @@ export default function Remittance() {
   const { user: me } = useAuth();
   const isSuper = ['super_admin', 'owner'].includes(me?.role);
 
+  const [provider, setProvider] = useState('wise'); // 'wise' | 'manual'
+  const [providers, setProviders] = useState([]);
   const [balances, setBalances] = useState(null);
   const [balancesErr, setBalancesErr] = useState(null);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [openSend, setOpenSend] = useState(false);
+  const [openManual, setOpenManual] = useState(false);
 
   async function loadBalances() {
     setBalancesErr(null);
@@ -45,7 +48,10 @@ export default function Remittance() {
       setRows(r.rows);
     } finally { setLoading(false); }
   }
-  useEffect(() => { loadBalances(); loadRows(); }, []);
+  useEffect(() => {
+    api.get('/api/wise/providers').then((r) => setProviders(r.providers || [])).catch(() => {});
+    loadBalances(); loadRows();
+  }, []);
 
   async function syncAll() {
     try {
@@ -69,11 +75,45 @@ export default function Remittance() {
     <div className="p-6 max-w-[1500px] mx-auto">
       <PageHeader
         title="Remittance 💸"
-        subtitle="Wise transfers — Nextgenase Inc"
-        actions={isSuper && <Button onClick={() => setOpenSend(true)}><Send size={14} /> Send money</Button>}
+        subtitle={provider === 'wise' ? 'Wise transfers — Nextgenase Inc' : 'Manual wire records'}
+        actions={isSuper && (
+          <Button onClick={() => provider === 'wise' ? setOpenSend(true) : setOpenManual(true)}>
+            <Send size={14} /> {provider === 'wise' ? 'Send via Wise' : 'Record manual wire'}
+          </Button>
+        )}
       />
 
-      {/* Balances */}
+      {/* Provider tabs */}
+      <Card className="p-2 mb-3">
+        <div className="flex flex-wrap gap-1">
+          {providers.map((p) => {
+            const disabled = !p.configured && p.id !== 'manual';
+            const active = provider === p.id;
+            return (
+              <button
+                key={p.id}
+                onClick={() => !disabled && setProvider(p.id)}
+                disabled={disabled}
+                title={disabled ? 'Provider not configured' : undefined}
+                style={{
+                  padding: '6px 14px', borderRadius: 8, border: 'none',
+                  background: active ? 'var(--bg-hover)' : 'transparent',
+                  color: disabled ? 'var(--text-tertiary)' : (active ? 'var(--text-primary)' : 'var(--text-secondary)'),
+                  fontSize: 13, fontWeight: 500, cursor: disabled ? 'not-allowed' : 'pointer',
+                  opacity: disabled ? 0.6 : 1,
+                }}
+              >
+                {p.id === 'wise' && '🏦 '}{p.id === 'manual' && '📋 '}{p.id === 'swift' && '🌐 '}{p.id === 'ach' && '🏧 '}
+                {p.label}
+                {!p.configured && p.id !== 'manual' && <span style={{ marginLeft: 6, fontSize: 10 }}>· soon</span>}
+              </button>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* Balances (Wise only) */}
+      {provider === 'wise' && (
       <Card className="p-4 mb-4">
         <div className="flex items-center justify-between mb-2">
           <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)' }}>
@@ -97,6 +137,7 @@ export default function Remittance() {
           </div>
         )}
       </Card>
+      )}
 
       {/* Transfer history */}
       <Card>
@@ -168,7 +209,111 @@ export default function Remittance() {
           onSent={() => { setOpenSend(false); loadRows(); loadBalances(); }}
         />
       )}
+      {openManual && (
+        <ManualWireModal
+          onClose={() => setOpenManual(false)}
+          onSaved={() => { setOpenManual(false); loadRows(); }}
+        />
+      )}
     </div>
+  );
+}
+
+// Manual-wire record-only modal (no API call to any provider).
+function ManualWireModal({ onClose, onSaved }) {
+  const [f, setF] = useState({
+    recipientName: '', recipientBank: '', recipientAccount: '', recipientCountry: '',
+    sourceCurrency: 'USD', targetCurrency: 'USD',
+    sourceAmount: '', targetAmount: '',
+    exchangeRate: '', providerFee: '',
+    providerReference: '', reference: '',
+    purpose: 'vendor',
+  });
+  const setField = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  async function save() {
+    setBusy(true); setErr(null);
+    try {
+      const body = {
+        ...f,
+        sourceAmount: parseFloat(f.sourceAmount) || 0,
+        targetAmount: parseFloat(f.targetAmount) || parseFloat(f.sourceAmount) || 0,
+        exchangeRate: f.exchangeRate ? parseFloat(f.exchangeRate) : null,
+        providerFee: f.providerFee ? parseFloat(f.providerFee) : null,
+      };
+      await api.post('/api/wise/manual', body);
+      toast.success('Manual wire recorded. Upload bank confirmation as proof in Approvals.');
+      onSaved();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Record manual wire" wide
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button onClick={save} disabled={busy || !f.recipientName || !f.sourceAmount}>
+          {busy ? 'Saving…' : 'Record wire'}
+        </Button>
+      </>}>
+      {err && <Alert tone="error" className="mb-3">{err}</Alert>}
+      <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10 }}>
+        For wires you've already initiated through your bank. Records the transfer in the ledger
+        without contacting any payment processor. Attach the bank confirmation later as proof.
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><Label>Recipient name *</Label>
+          <Input value={f.recipientName} onChange={(e) => setField('recipientName', e.target.value)} />
+        </div>
+        <div><Label>Bank</Label>
+          <Input value={f.recipientBank} onChange={(e) => setField('recipientBank', e.target.value)} />
+        </div>
+        <div><Label>Account number / IBAN</Label>
+          <Input value={f.recipientAccount} onChange={(e) => setField('recipientAccount', e.target.value)} />
+        </div>
+        <div><Label>Country</Label>
+          <Input value={f.recipientCountry} onChange={(e) => setField('recipientCountry', e.target.value)} />
+        </div>
+        <div><Label>Source amount *</Label>
+          <div className="flex gap-2">
+            <Input type="number" step="0.01" value={f.sourceAmount} onChange={(e) => setField('sourceAmount', e.target.value)} />
+            <Select value={f.sourceCurrency} onChange={(e) => setField('sourceCurrency', e.target.value)} style={{ maxWidth: 90 }}>
+              <option>USD</option><option>EUR</option><option>GBP</option>
+            </Select>
+          </div>
+        </div>
+        <div><Label>Target amount</Label>
+          <div className="flex gap-2">
+            <Input type="number" step="0.01" value={f.targetAmount} onChange={(e) => setField('targetAmount', e.target.value)} />
+            <Select value={f.targetCurrency} onChange={(e) => setField('targetCurrency', e.target.value)} style={{ maxWidth: 90 }}>
+              <option>USD</option><option>EUR</option><option>GBP</option><option>PKR</option><option>INR</option>
+            </Select>
+          </div>
+        </div>
+        <div><Label>Exchange rate</Label>
+          <Input type="number" step="0.000001" value={f.exchangeRate} onChange={(e) => setField('exchangeRate', e.target.value)} />
+        </div>
+        <div><Label>Bank fee</Label>
+          <Input type="number" step="0.01" value={f.providerFee} onChange={(e) => setField('providerFee', e.target.value)} />
+        </div>
+        <div><Label>Bank wire reference</Label>
+          <Input value={f.providerReference} onChange={(e) => setField('providerReference', e.target.value)} placeholder="e.g. WIRE12345" />
+        </div>
+        <div><Label>Purpose</Label>
+          <Select value={f.purpose} onChange={(e) => setField('purpose', e.target.value)}>
+            <option value="salary">Salary</option>
+            <option value="vendor">Vendor payment</option>
+            <option value="client_payout">Client payout</option>
+            <option value="other">Other</option>
+          </Select>
+        </div>
+        <div className="col-span-2"><Label>Reference (note for ourselves)</Label>
+          <Input value={f.reference} onChange={(e) => setField('reference', e.target.value)} />
+        </div>
+      </div>
+    </Modal>
   );
 }
 
