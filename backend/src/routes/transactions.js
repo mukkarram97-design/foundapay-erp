@@ -14,7 +14,9 @@ router.get('/:id/receipt', async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
     const r = await pool.query(`
-      SELECT t.*, c.name AS client_name, e.legal_name AS entity_name, m.processor_name
+      SELECT t.*, c.name AS client_name, c.logo_url AS client_logo,
+             e.legal_name AS entity_name, e.logo_url AS entity_logo,
+             m.processor_name
         FROM transactions t
         LEFT JOIN clients c ON c.id = t.client_id
         LEFT JOIN entities e ON e.id = t.entity_id
@@ -29,7 +31,13 @@ router.get('/:id/receipt', async (req, res) => {
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="FoundaPay-Receipt-TXN${id}.pdf"`);
-    buildReceipt(tx, { entity_name: tx.entity_name, processor_name: tx.processor_name }, res);
+    buildReceipt(tx, {
+      entity_name: tx.entity_name,
+      client_name: tx.client_name,
+      processor_name: tx.processor_name,
+      // Prefer entity logo > client logo (matches the priority used at link-gen time)
+      logo_url: tx.entity_logo || tx.client_logo || null,
+    }, res);
   } catch (err) {
     console.error('[tx/receipt]', err);
     res.status(500).json({ error: err.message });

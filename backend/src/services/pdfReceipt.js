@@ -1,5 +1,7 @@
 // PDF receipt + statement generators using pdfkit
 const PDFDocument = require('pdfkit');
+const fs = require('fs');
+const path = require('path');
 
 const PURPLE = '#7C3AED';
 const PURPLE_DARK = '#5B21B6';
@@ -7,6 +9,46 @@ const PURPLE_LIGHT = '#EDE9FE';
 const TEXT_DARK = '#1A1027';
 const TEXT_MUTED = '#6B7280';
 const BORDER = '#E5E7EB';
+const PAID_GREEN = '#16a34a';
+const REFUND_RED = '#dc2626';
+const UPLOADS_PREFIX = '/uploads/';
+const UPLOADS_DISK_ROOT = '/var/www/foundapay/uploads/';
+
+// Resolve logo URL ('/uploads/logos/x.png') to a local file path on the VPS.
+// Returns null if the URL is malformed, the file doesn't exist, or it's an
+// unsupported format (pdfkit can't render SVG).
+function resolveLogoPath(logoUrl) {
+  if (!logoUrl || typeof logoUrl !== 'string') return null;
+  if (!logoUrl.startsWith(UPLOADS_PREFIX)) return null;
+  const ext = path.extname(logoUrl).toLowerCase();
+  if (!['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) return null;
+  const rel = logoUrl.slice(UPLOADS_PREFIX.length);
+  const abs = path.join(UPLOADS_DISK_ROOT, rel);
+  if (!abs.startsWith(UPLOADS_DISK_ROOT)) return null; // path-traversal guard
+  try { fs.accessSync(abs, fs.constants.R_OK); return abs; }
+  catch { return null; }
+}
+
+// Programmatic PAID watermark — no image asset, no missing-file failures.
+// Rotated 15°, green-600, semi-transparent. Doesn't obscure financial details
+// because we position it in the upper-right corner of the body area.
+function drawPaidStamp(doc, { x = 380, y = 140 } = {}) {
+  doc.save();
+  doc.translate(x, y);
+  doc.rotate(-15);
+  doc.lineWidth(3);
+  doc.strokeColor(PAID_GREEN);
+  doc.fillColor(PAID_GREEN);
+  doc.opacity(0.85);
+  doc.roundedRect(0, 0, 160, 80, 8).stroke();
+  doc.fontSize(36).font('Helvetica-Bold')
+     .text('PAID', 0, 12, { width: 160, align: 'center' });
+  doc.fontSize(8).font('Helvetica')
+     .text('TRANSACTION COMPLETE', 0, 56, { width: 160, align: 'center' });
+  doc.opacity(1);
+  doc.restore();
+  // TODO: add drawRefundedStamp variant in red when refund-tracking ships
+}
 
 const STATUS_COLORS = {
   Completed: { bg: '#D1FAE5', fg: '#065F46', label: 'COMPLETED ✓' },
@@ -31,7 +73,7 @@ function buildReceipt(tx, related = {}, stream) {
   const doc = new PDFDocument({ size: 'A4', margin: 0 });
   doc.pipe(stream);
 
-  // Header — purple bar
+  // Header — purple bar (FoundaPay platform branding)
   doc.rect(0, 0, doc.page.width, 80).fill(PURPLE);
   doc.fillColor('#FFFFFF').fontSize(28).font('Helvetica-Bold').text('Founda Pay', 40, 28);
   doc.fontSize(11).font('Helvetica').text('TRANSACTION RECEIPT', 0, 36, { width: doc.page.width - 40, align: 'right' });
@@ -39,14 +81,41 @@ function buildReceipt(tx, related = {}, stream) {
   // Reset
   doc.fillColor(TEXT_DARK);
 
+  // Brand strip — client/entity logo + name (whose payment this is)
+  // Sits below the platform header. Logo top-left if present; else just text.
+  const logoPath = resolveLogoPath(related.logo_url);
+  const brandName = related.entity_name || related.client_name || tx.counterparty_name || '';
+  let stripBottom = 95;
+  if (logoPath || brandName) {
+    if (logoPath) {
+      try {
+        doc.image(logoPath, 40, 90, { fit: [120, 32], align: 'left', valign: 'center' });
+      } catch (e) {
+        // If pdfkit can't decode the file, fall back to text silently
+        doc.font('Helvetica-Bold').fontSize(13).fillColor(TEXT_DARK).text(brandName, 40, 96);
+      }
+      stripBottom = 130;
+    } else if (brandName) {
+      doc.font('Helvetica-Bold').fontSize(13).fillColor(TEXT_DARK).text(brandName, 40, 96);
+      stripBottom = 120;
+    }
+  }
+
+  // PAID stamp — only on completed transactions, upper-right area below header.
+  // Drawn programmatically (no image asset → no missing-file failures).
+  const isPaid = (tx.status || '').toLowerCase() === 'completed' || (tx.status || '').toLowerCase() === 'paid';
+  if (isPaid) {
+    drawPaidStamp(doc, { x: doc.page.width - 200, y: 95 });
+  }
+
   // Receipt meta
-  let y = 110;
-  doc.font('Helvetica-Bold').fontSize(14).text(`Receipt #TXN-${tx.id}`, 40, y);
+  let y = Math.max(stripBottom + 10, 130);
+  doc.font('Helvetica-Bold').fontSize(14).fillColor(TEXT_DARK).text(`Receipt #TXN-${tx.id}`, 40, y);
   doc.font('Helvetica').fontSize(10).fillColor(TEXT_MUTED)
     .text(`Date: ${fmtDate(tx.date_received)}`, 40, y + 22)
     .text(`Generated: ${new Date().toLocaleString('en-US')}`, 40, y + 36);
 
-  // Status badge — top right
+  // Status badge — top right (kept; complements the stamp)
   const status = STATUS_COLORS[tx.status] || STATUS_COLORS.Completed;
   const badgeX = doc.page.width - 180, badgeY = y, badgeW = 140, badgeH = 32;
   doc.rect(badgeX, badgeY, badgeW, badgeH).fill(status.bg);
