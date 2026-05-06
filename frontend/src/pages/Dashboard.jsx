@@ -15,10 +15,13 @@ import NewTransactionModal from '../components/NewTransactionModal';
 import { useAuth } from '../store/auth';
 
 const PERIODS = [
-  { id: 'april_2026', label: 'April 2026' },
-  { id: 'q1_2026',    label: 'Q1 2026' },
-  { id: 'mtd',        label: 'This Month' },
   { id: 'today',      label: 'Today' },
+  { id: 'last_7d',    label: '7d' },
+  { id: 'last_30d',   label: '30d' },
+  { id: 'mtd',        label: 'MTD' },
+  { id: 'qtd',        label: 'QTD' },
+  { id: 'ytd',        label: 'YTD' },
+  { id: 'custom',     label: 'Custom' },
 ];
 
 const PIE_COLORS = ['#7C3AED', '#10B981', '#F59E0B', '#3B82F6', '#06B6D4', '#EC4899'];
@@ -26,7 +29,11 @@ const PIE_COLORS = ['#7C3AED', '#10B981', '#F59E0B', '#3B82F6', '#06B6D4', '#EC4
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [period, setPeriod] = useState('april_2026');
+  const [period, setPeriod] = useState('mtd');
+  const [customFrom, setCustomFrom] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 30); return d.toISOString().slice(0, 10);
+  });
+  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0, 10));
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [openTx, setOpenTx] = useState(null);
@@ -40,8 +47,11 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    api.get(`/api/dashboard/summary?period=${period}`).then(setData).catch((e) => setErr(e.message));
-  }, [period]);
+    const url = period === 'custom'
+      ? `/api/dashboard/summary?period=custom&from=${customFrom}&to=${customTo}`
+      : `/api/dashboard/summary?period=${period}`;
+    api.get(url).then(setData).catch((e) => setErr(e.message));
+  }, [period, customFrom, customTo]);
 
   const methodPie = useMemo(() => {
     if (!data) return [];
@@ -68,6 +78,31 @@ export default function Dashboard() {
               }}
             >{p.label}</button>
           ))}
+          {period === 'custom' && (
+            <>
+              <input
+                type="date"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+                style={{
+                  padding: '6px 10px', borderRadius: 8,
+                  background: 'var(--bg-tertiary)', color: 'var(--text-primary)',
+                  border: '1px solid var(--border)', fontSize: 13,
+                }}
+              />
+              <span style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>→</span>
+              <input
+                type="date"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+                style={{
+                  padding: '6px 10px', borderRadius: 8,
+                  background: 'var(--bg-tertiary)', color: 'var(--text-primary)',
+                  border: '1px solid var(--border)', fontSize: 13,
+                }}
+              />
+            </>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button variant="secondary" onClick={() => window.open('/api/transactions/export', '_blank')}>
@@ -231,8 +266,8 @@ export default function Dashboard() {
           clients={clients}
           entities={entities}
           onClose={() => setOpenTx(null)}
-          onSaved={() => { setOpenTx(null); api.get(`/api/dashboard/summary?period=${period}`).then(setData); }}
-          onDeleted={() => { setOpenTx(null); api.get(`/api/dashboard/summary?period=${period}`).then(setData); }}
+          onSaved={() => { setOpenTx(null); api.get(period === 'custom' ? `/api/dashboard/summary?period=custom&from=${customFrom}&to=${customTo}` : `/api/dashboard/summary?period=${period}`).then(setData); }}
+          onDeleted={() => { setOpenTx(null); api.get(period === 'custom' ? `/api/dashboard/summary?period=custom&from=${customFrom}&to=${customTo}` : `/api/dashboard/summary?period=${period}`).then(setData); }}
         />
       )}
       {createOpen && (
@@ -240,7 +275,7 @@ export default function Dashboard() {
           onClose={() => setCreateOpen(false)}
           onSaved={() => {
             setCreateOpen(false);
-            api.get(`/api/dashboard/summary?period=${period}`).then(setData);
+            api.get(period === 'custom' ? `/api/dashboard/summary?period=custom&from=${customFrom}&to=${customTo}` : `/api/dashboard/summary?period=${period}`).then(setData);
           }}
         />
       )}

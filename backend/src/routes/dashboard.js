@@ -14,18 +14,37 @@ router.get('/summary', async (req, res) => {
   try {
     const { period = 'mtd', from, to } = req.query;
     let dateFrom, dateTo;
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    const now = new Date();
     if (period === 'today') {
-      dateFrom = dateTo = new Date().toISOString().slice(0,10);
+      dateFrom = dateTo = fmt(now);
+    } else if (period === 'last_7d' || period === '7d') {
+      const d = new Date(now); d.setDate(d.getDate() - 7);
+      dateFrom = fmt(d); dateTo = fmt(now);
+    } else if (period === 'last_30d' || period === '30d') {
+      const d = new Date(now); d.setDate(d.getDate() - 30);
+      dateFrom = fmt(d); dateTo = fmt(now);
     } else if (period === 'mtd') {
-      const d = new Date();
-      dateFrom = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0,10);
-      dateTo = new Date().toISOString().slice(0,10);
+      dateFrom = fmt(new Date(now.getFullYear(), now.getMonth(), 1));
+      dateTo = fmt(now);
+    } else if (period === 'qtd') {
+      const qStart = Math.floor(now.getMonth() / 3) * 3;
+      dateFrom = fmt(new Date(now.getFullYear(), qStart, 1));
+      dateTo = fmt(now);
+    } else if (period === 'ytd') {
+      dateFrom = fmt(new Date(now.getFullYear(), 0, 1));
+      dateTo = fmt(now);
     } else if (period === 'q1_2026') {
       dateFrom = '2026-01-01'; dateTo = '2026-03-31';
     } else if (period === 'april_2026') {
       dateFrom = '2026-04-01'; dateTo = '2026-04-30';
     } else if (period === 'custom') {
       dateFrom = from; dateTo = to;
+    }
+    if (!dateFrom || !dateTo) {
+      // sane fallback to MTD if anything went wrong
+      dateFrom = fmt(new Date(now.getFullYear(), now.getMonth(), 1));
+      dateTo = fmt(now);
     }
     const params = [dateFrom, dateTo];
 
