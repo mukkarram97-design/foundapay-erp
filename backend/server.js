@@ -35,6 +35,7 @@ const banksRoutes           = require('./src/routes/banks');
 const approvalsRoutes       = require('./src/routes/approvals');
 const wiseRoutes            = require('./src/routes/wise');
 const permissionsRoutes     = require('./src/routes/permissions');
+const settingsRoutes        = require('./src/routes/settings');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -77,6 +78,7 @@ app.use('/api/banks',          banksRoutes);
 app.use('/api/approvals',      approvalsRoutes);
 app.use('/api/wise',           wiseRoutes);
 app.use('/api/permissions',    permissionsRoutes);
+app.use('/api/settings/integrations', settingsRoutes);
 app.use('/api/dashboard',      dashboardRoutes);
 app.use('/api/reports',        reportsRoutes);
 app.use('/api/salary',         salaryRoutes);

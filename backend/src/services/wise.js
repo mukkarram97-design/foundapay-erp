@@ -1,31 +1,73 @@
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Wise (TransferWise) API client.
 //
-// Env:
-//   WISE_API_TOKEN   — bearer token
-//   WISE_PROFILE_ID  — business profile ID
-//   WISE_ENV         — 'sandbox' | 'live'
+// Credential source order:
+//   1. integration_credentials DB row (provider='wise') — entered via UI,
+//      AES-256-GCM encrypted with APP_ENCRYPTION_KEY
+//   2. WISE_API_TOKEN env var (legacy fallback)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+const integrationCreds = require('./integrationCredentials');
+
+// Cache decrypted token + metadata for 60s to avoid hitting the DB every call.
+const TOKEN_TTL_MS = 60_000;
+let _cache = { at: 0, token: null, profileId: null, env: null };
+
+async function loadConfig() {
+  const now = Date.now();
+  if (_cache.at && now - _cache.at < TOKEN_TTL_MS) return _cache;
+
+  // Prefer DB-encrypted credentials.
+  let token = null, profileId = null, env = null;
+  try {
+    const dbToken = await integrationCreds.getDecryptedToken('wise');
+    const status = await integrationCreds.getStatus('wise');
+    if (dbToken) {
+      token = dbToken;
+      profileId = status?.metadata?.profile_id || process.env.WISE_PROFILE_ID || null;
+      env = status?.metadata?.environment || process.env.WISE_ENV || 'sandbox';
+    }
+  } catch (e) {
+    // DB unreachable / decrypt failed → fall back to env.
+    console.warn('[wise] DB credential read failed, falling back to env:', e.message);
+  }
+
+  if (!token) {
+    token = process.env.WISE_API_TOKEN || null;
+    profileId = process.env.WISE_PROFILE_ID || null;
+    env = process.env.WISE_ENV || 'sandbox';
+  }
+
+  _cache = { at: now, token, profileId, env: String(env || 'sandbox').toLowerCase() };
+  return _cache;
+}
+
+// Force a refresh — call after the UI saves new credentials.
+function invalidateCache() { _cache = { at: 0, token: null, profileId: null, env: null }; }
+
+// Quick configured check — used by routes that gate behind isConfigured().
+// Synchronous fallback to env so we don't break existing call patterns; full
+// async refresh happens inside request().
 function isConfigured() {
+  if (_cache.at && Date.now() - _cache.at < TOKEN_TTL_MS) {
+    return !!(_cache.token && _cache.profileId);
+  }
   return !!(process.env.WISE_API_TOKEN && process.env.WISE_PROFILE_ID);
 }
 
-function baseUrl() {
-  const env = (process.env.WISE_ENV || 'sandbox').toLowerCase();
-  return env === 'live' ? 'https://api.transferwise.com' : 'https://api.sandbox.transferwise.tech';
-}
-
-function profileId() {
-  return process.env.WISE_PROFILE_ID;
+function baseUrlFor(env) {
+  return (env === 'live') ? 'https://api.transferwise.com' : 'https://api.sandbox.transferwise.tech';
 }
 
 async function request(method, path, body) {
-  if (!isConfigured()) throw new Error('Wise not configured (WISE_API_TOKEN / WISE_PROFILE_ID missing)');
-  const r = await fetch(`${baseUrl()}${path}`, {
+  const cfg = await loadConfig();
+  if (!cfg.token || !cfg.profileId) {
+    throw new Error('Wise not configured. Add credentials at /settings (Integrations → Wise).');
+  }
+  const r = await fetch(`${baseUrlFor(cfg.env)}${path}`, {
     method,
     headers: {
-      'Authorization': `Bearer ${process.env.WISE_API_TOKEN}`,
+      'Authorization': `Bearer ${cfg.token}`,
       'Content-Type': 'application/json',
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -46,27 +88,30 @@ async function request(method, path, body) {
 // ━━━ Public wrappers ━━━
 
 async function getBalances() {
-  // Multi-currency account → list balances. v4 API:
-  return request('GET', `/v4/profiles/${profileId()}/balances?types=STANDARD`);
+  const cfg = await loadConfig();
+  return request('GET', `/v4/profiles/${cfg.profileId}/balances?types=STANDARD`);
 }
 
 async function createQuote({ sourceCurrency, targetCurrency, sourceAmount, targetAmount }) {
+  const cfg = await loadConfig();
   const body = {
     sourceCurrency, targetCurrency,
     payOut: 'BANK_TRANSFER',
   };
   if (sourceAmount) body.sourceAmount = parseFloat(sourceAmount);
   if (targetAmount) body.targetAmount = parseFloat(targetAmount);
-  return request('POST', `/v3/profiles/${profileId()}/quotes`, body);
+  return request('POST', `/v3/profiles/${cfg.profileId}/quotes`, body);
 }
 
 async function listRecipients(currency) {
+  const cfg = await loadConfig();
   const q = currency ? `?currency=${currency}` : '';
-  return request('GET', `/v1/accounts${q}&profile=${profileId()}`.replace('?&', '?'));
+  return request('GET', `/v1/accounts${q}&profile=${cfg.profileId}`.replace('?&', '?'));
 }
 
 async function createRecipient(body) {
-  return request('POST', `/v1/accounts`, { ...body, profile: parseInt(profileId(), 10) });
+  const cfg = await loadConfig();
+  return request('POST', `/v1/accounts`, { ...body, profile: parseInt(cfg.profileId, 10) });
 }
 
 async function createTransfer({ targetAccount, quoteUuid, customerTransactionId, reference, sourceOfFunds }) {
@@ -79,7 +124,8 @@ async function createTransfer({ targetAccount, quoteUuid, customerTransactionId,
 }
 
 async function fundTransfer(transferId) {
-  return request('POST', `/v3/profiles/${profileId()}/transfers/${transferId}/payments`, { type: 'BALANCE' });
+  const cfg = await loadConfig();
+  return request('POST', `/v3/profiles/${cfg.profileId}/transfers/${transferId}/payments`, { type: 'BALANCE' });
 }
 
 async function getTransfer(transferId) {
@@ -87,12 +133,14 @@ async function getTransfer(transferId) {
 }
 
 async function getReceipt(transferId) {
-  // Wise returns a PDF binary; for our UI we just point at the URL.
-  return `${baseUrl()}/v1/transfers/${transferId}/receipt.pdf`;
+  const cfg = await loadConfig();
+  return `${baseUrlFor(cfg.env)}/v1/transfers/${transferId}/receipt.pdf`;
 }
 
 module.exports = {
   isConfigured,
+  invalidateCache,
+  loadConfig,
   getBalances,
   createQuote,
   listRecipients,
