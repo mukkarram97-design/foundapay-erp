@@ -336,7 +336,9 @@ export default function Transactions() {
               {PAGE_SIZES.map((s) => <option key={s} value={s}>{s === 'all' ? 'All' : s}</option>)}
             </Select>
             <Button variant="secondary" disabled={page === 1} onClick={() => setPage(page - 1)}>Prev</Button>
-            <span style={{ color: 'var(--text-secondary)' }}>{page} / {totalPages}</span>
+            <span style={{ color: 'var(--text-secondary)', fontSize: 13, padding: '0 8px', whiteSpace: 'nowrap' }}>
+              Page {page} of {totalPages}
+            </span>
             <Button variant="secondary" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>Next</Button>
           </div>
         </div>

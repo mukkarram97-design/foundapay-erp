@@ -426,6 +426,18 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
 
     if (result.success) {
       // ━━━ 5b SUCCESS BRANCH ━━━
+      // Lookup the client's card_pct so the master ledger row stores the actual
+      // commission. Without this, every payment_link transaction was recorded
+      // with foundapay_fee_pct=0 and fee_amount=0 (not just displayed wrong —
+      // truly missing in DB). Payment links are always card → use card_pct.
+      let feePct = 0;
+      if (lockedVt?.client_id) {
+        const cl = await c.query('SELECT card_pct FROM clients WHERE id = $1', [lockedVt.client_id]);
+        feePct = parseFloat(cl.rows[0]?.card_pct) || 0;
+      }
+      const feeAmount = parseFloat((amount * feePct).toFixed(4));
+      const netAmount = parseFloat((amount - feeAmount).toFixed(4));
+
       const tx = await recordTransaction(c, {
         amount,
         type: 'Received',
@@ -434,6 +446,9 @@ router.post('/api/pay/process', express.json(), async (req, res) => {
         counterpartyName: customerName || (customer?.email || 'Anonymous payer'),
         entityId: lockedVt?.entity_id || null,
         paymentMethod: 'Debit/Credit Cards',
+        feePct,                               // <- now populated
+        feeAmount,                            // <- now populated
+        netAmount,                            // <- explicitly set so it = gross - fee
         externalTxnId: result.transactionId,
         processorReference: result.authCode,
         cardLast4: result.last4,
