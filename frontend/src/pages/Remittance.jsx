@@ -9,6 +9,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Send, RefreshCw, Plus, Upload, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight,
+  Trash2,
 } from 'lucide-react';
 import { api } from '../utils/api';
 import {
@@ -105,6 +106,23 @@ export default function Remittance() {
     } catch (e) { toast.error(e.message); }
   }
 
+  async function uploadProofFor(row, file) {
+    if (!file) return;
+    try {
+      const fd = new FormData();
+      fd.append('proof', file);
+      const token = localStorage.getItem('foundapay_token');
+      const r = await fetch(`/api/wise/manual/${row.id}/proof`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      if (!r.ok) throw new Error((await r.json()).error || 'Upload failed');
+      toast.success('Proof uploaded — transfer marked completed');
+      loadRows();
+    } catch (e) { toast.error(e.message); }
+  }
+
   const filteredRows = useMemo(() => {
     if (tab === 'all') return rows;
     return rows.filter((r) => (r.provider || 'wise') === tab);
@@ -191,9 +209,20 @@ export default function Remittance() {
                   <Td className="text-right font-mono">{r.wise_fee != null ? money(r.wise_fee, r.source_currency) : (r.provider_fee != null ? money(r.provider_fee, r.source_currency) : '—')}</Td>
                   <Td><Badge tone={sd.tone}>{sd.label}</Badge></Td>
                   <Td>
-                    <div className="flex gap-1 flex-wrap">
+                    <div className="flex gap-1 flex-wrap items-center">
                       {(r.provider || 'wise') === 'wise' && r.status === 'transfer_created' && isSuper && (
                         <Button size="sm" variant="success" onClick={() => fundOne(r)}>Fund</Button>
+                      )}
+                      {(r.provider || 'wise') === 'manual' && !['completed', 'cancelled'].includes(r.status) && (
+                        <label className="fp-btn fp-btn-secondary" style={{ cursor: 'pointer', padding: '4px 8px', fontSize: 11 }}>
+                          <Upload size={11} /> {r.proof_url ? 'Replace proof' : 'Upload proof'}
+                          <input type="file" hidden accept=".pdf,.png,.jpg,.jpeg"
+                            onChange={(e) => e.target.files[0] && uploadProofFor(r, e.target.files[0])} />
+                        </label>
+                      )}
+                      {r.proof_url && (
+                        <a href={r.proof_url} target="_blank" rel="noreferrer"
+                          style={{ fontSize: 11, color: 'var(--accent)' }}>📎 Proof</a>
                       )}
                       {r.wise_transfer_id && (r.provider || 'wise') === 'wise' && (
                         <a href={`https://wise.com/transfer/${r.wise_transfer_id}`} target="_blank" rel="noreferrer"
@@ -260,9 +289,11 @@ function TransferModal({ providers, onClose, onCreated }) {
     email: '',
     legalType: 'PRIVATE',
   });
-  const [savedRecipients, setSavedRecipients] = useState([]);
+  const [savedRecipients, setSavedRecipients] = useState([]);   // from Wise
   const [savedRecipientId, setSavedRecipientId] = useState(''); // '' means using inline form
   const [saveForFuture, setSaveForFuture] = useState(true);
+  const [erpSavedRecipients, setErpSavedRecipients] = useState([]); // ERP-side address book
+  const [erpSavedRecipientId, setErpSavedRecipientId] = useState(''); // selected ERP-saved recipient
   const [payrollMode, setPayrollMode] = useState(false);
   const [payrollItems, setPayrollItems] = useState([]);
   const [linkedPayrollItemId, setLinkedPayrollItemId] = useState(null);
@@ -292,13 +323,39 @@ function TransferModal({ providers, onClose, onCreated }) {
     if (c) setAmount((a) => ({ ...a, target: c.currency }));
   }, [country]);
 
-  // Load saved recipients (from Wise)
+  // Load saved recipients (Wise + ERP-side address book)
   useEffect(() => {
     api.get('/api/wise/recipients').then((r) => {
       const list = r.recipients?.content || r.recipients || [];
       setSavedRecipients(Array.isArray(list) ? list : []);
     }).catch(() => setSavedRecipients([]));
+    api.get('/api/wise/saved-recipients').then((r) => setErpSavedRecipients(r.rows || []))
+      .catch(() => setErpSavedRecipients([]));
   }, []);
+
+  // When user picks an ERP-saved recipient, prefill the inline form so they
+  // can review and proceed (and skip the Wise create call when wise_recipient_id is set).
+  function applyErpSavedRecipient(saved) {
+    setErpSavedRecipientId(saved.id);
+    setCountry(saved.country || 'PK');
+    setRecipient((r) => ({
+      ...r,
+      name: saved.name,
+      bankName: saved.bank_name || '',
+      accountNumber: saved.account_number || '',
+      iban: saved.iban || '',
+      branchCode: saved.branch_code || '',
+      routingNumber: saved.routing_number || '',
+      sortCode: saved.sort_code || '',
+      swift: saved.swift_bic || '',
+      city: saved.city || '',
+      addressLine: saved.address_line || '',
+      postCode: saved.post_code || '',
+      email: saved.email || '',
+      legalType: saved.legal_type || 'PRIVATE',
+    }));
+    if (saved.wise_recipient_id) setSavedRecipientId(saved.wise_recipient_id);
+  }
 
   // Load pending payroll items when payroll mode toggled on
   useEffect(() => {
@@ -358,6 +415,33 @@ function TransferModal({ providers, onClose, onCreated }) {
           const newRec = await createWiseRecipient({ country, recipient, currency: amount.target });
           recipientId = newRec.id;
           setSavedRecipientId(String(newRec.id));
+
+          // Optionally save to the ERP-side address book as well.
+          if (saveForFuture) {
+            try {
+              await api.post('/api/wise/saved-recipients', {
+                name: recipient.name,
+                country,
+                bank_name: recipient.bankName,
+                account_type: recipient.accountType,
+                iban: recipient.iban,
+                account_number: recipient.accountNumber,
+                routing_number: recipient.routingNumber,
+                sort_code: recipient.sortCode,
+                swift_bic: recipient.swift,
+                branch_code: recipient.branchCode,
+                city: recipient.city,
+                address_line: recipient.addressLine,
+                post_code: recipient.postCode,
+                email: recipient.email,
+                legal_type: recipient.legalType,
+                wise_recipient_id: String(newRec.id),
+              });
+            } catch (saveErr) {
+              // Non-fatal; just log
+              console.warn('saving recipient to ERP address book failed:', saveErr.message);
+            }
+          }
         }
         if (!quote) { setErr('Please get a quote first'); setBusy(false); return; }
 
@@ -397,6 +481,29 @@ function TransferModal({ providers, onClose, onCreated }) {
           payrollItemId: linkedPayrollItemId,
         };
         const r = await api.post('/api/wise/manual', body);
+        // Save manual-wire recipient to the ERP address book if toggled on
+        if (saveForFuture && !erpSavedRecipientId) {
+          try {
+            await api.post('/api/wise/saved-recipients', {
+              name: recipient.name,
+              country,
+              bank_name: recipient.bankName,
+              iban: recipient.iban,
+              account_number: recipient.accountNumber,
+              routing_number: recipient.routingNumber,
+              sort_code: recipient.sortCode,
+              swift_bic: recipient.swift,
+              branch_code: recipient.branchCode,
+              city: recipient.city,
+              address_line: recipient.addressLine,
+              post_code: recipient.postCode,
+              email: recipient.email,
+              legal_type: recipient.legalType,
+            });
+          } catch (saveErr) {
+            console.warn('saving manual recipient failed:', saveErr.message);
+          }
+        }
         setCreated({ channel: 'manual', remittance: r.remittance });
       }
     } catch (e) { setErr(e.message); }
@@ -491,10 +598,37 @@ function TransferModal({ providers, onClose, onCreated }) {
       {/* Step 2 — Recipient */}
       {step === 2 && (
         <div>
-          {/* Saved recipients (Wise only) */}
+          {/* ERP-side saved recipients (works for any channel — Wise + Manual) */}
+          {erpSavedRecipients.length > 0 && (
+            <div className="mb-3">
+              <Label>Saved recipients <span style={{ fontSize: 10, color: 'var(--text-tertiary)', textTransform: 'none', fontWeight: 400 }}>(your address book)</span></Label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {erpSavedRecipients.map((s) => {
+                  const selected = s.id === erpSavedRecipientId;
+                  return (
+                    <button key={s.id} type="button" onClick={() => applyErpSavedRecipient(s)}
+                      style={{
+                        textAlign: 'left', padding: 10, borderRadius: 8,
+                        border: `2px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                        background: selected ? 'var(--accent-dim)' : 'var(--bg-secondary)',
+                        cursor: 'pointer',
+                      }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{s.name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                        {s.country || '—'} · {s.bank_name || '—'}
+                        {(s.iban || s.account_number) && ` · ••${(s.iban || s.account_number).slice(-4)}`}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Wise's own saved-recipients list (only relevant when channel=wise) */}
           {channel === 'wise' && savedRecipients.length > 0 && (
             <div className="mb-3">
-              <Label>Use saved recipient</Label>
+              <Label>Wise saved recipient</Label>
               <Select value={savedRecipientId} onChange={(e) => setSavedRecipientId(e.target.value)}>
                 <option value="">— Add new below —</option>
                 {savedRecipients.map((r) => (

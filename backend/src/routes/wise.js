@@ -14,6 +14,9 @@
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 const { pool } = require('../db');
 const { authRequired } = require('../middleware/auth');
 const { logAudit } = require('../services/audit');
@@ -21,6 +24,25 @@ const wise = require('../services/wise');
 const remittance = require('../services/remittance');
 
 const router = express.Router();
+
+// Proof uploads — wire confirmations, bank receipts, etc.
+const PROOF_DIR = '/var/www/foundapay/uploads/remittance-proofs';
+try { fs.mkdirSync(PROOF_DIR, { recursive: true }); } catch {}
+const proofUpload = multer({
+  storage: multer.diskStorage({
+    destination: PROOF_DIR,
+    filename: (req, file, cb) => {
+      const ext = (path.extname(file.originalname).toLowerCase() || '.pdf').slice(0, 6);
+      cb(null, `proof-${req.params.id}-${Date.now()}${ext}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
+    if (!allowed.includes(file.mimetype)) return cb(new Error('PDF, PNG, or JPG only'));
+    cb(null, true);
+  },
+});
 
 // GET /api/wise/providers — list all available remittance providers + status
 router.get('/providers', authRequired, (req, res) => {
@@ -349,6 +371,136 @@ router.post('/sync', requireConfigured, async (req, res) => {
       } catch { /* skip individual failures */ }
     }
     res.json({ ok: true, updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ━━━ POST /api/wise/manual/:id/proof — upload bank confirmation, mark completed ━━━
+// Closes the loop on a manual-wire remittance:
+//   1. Stores the proof file under /uploads/remittance-proofs/
+//   2. Updates remittances: status='completed', proof_url, proof_uploaded_*, completed_at
+//   3. Updates linked transactions row to status='Completed'
+//   4. If linked to a salary_items row, marks it paid (same as Wise fund flow)
+router.post('/manual/:id/proof', authRequired, proofUpload.single('proof'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const c = await pool.connect();
+  try {
+    const cur = await c.query('SELECT * FROM remittances WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Not found' });
+    const row = cur.rows[0];
+    if ((row.provider || row.channel || 'wise') !== 'manual') {
+      return res.status(400).json({ error: 'Proof upload is only for manual wires (Wise transfers go through /:id/fund)' });
+    }
+    const proofUrl = `/uploads/remittance-proofs/${path.basename(req.file.path)}`;
+
+    await c.query('BEGIN');
+    await c.query(`
+      UPDATE remittances
+         SET proof_url = $1, proof_uploaded_at = NOW(), proof_uploaded_by = $2,
+             status = 'completed', completed_at = NOW(), updated_at = NOW()
+       WHERE id = $3
+    `, [proofUrl, req.user.id, req.params.id]);
+
+    if (row.transaction_id) {
+      await c.query(
+        `UPDATE transactions SET status = 'Completed', updated_at = NOW() WHERE id = $1`,
+        [row.transaction_id]
+      ).catch(() => {});
+    }
+    if (row.payroll_item_id) {
+      await c.query(
+        `UPDATE salary_items SET status = 'paid', paid_at = NOW() WHERE id = $1`,
+        [row.payroll_item_id]
+      ).catch(() => {});
+    }
+    await c.query('COMMIT');
+
+    await logAudit({
+      action: 'remittance.proof_uploaded',
+      entityType: 'remittances', entityId: req.params.id,
+      userId: req.user.id,
+      metadata: { proof_url: proofUrl, mimetype: req.file.mimetype, size: req.file.size },
+      ipAddress: req.ip, userAgent: req.headers['user-agent'],
+    });
+    res.json({ ok: true, proof_url: proofUrl });
+  } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
+    console.error('[remittance proof]', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// ━━━ Saved recipients (ERP-side address book) ━━━
+//
+// GET    /api/wise/saved-recipients              list all active
+// POST   /api/wise/saved-recipients              create one
+// DELETE /api/wise/saved-recipients/:id          soft-delete
+//
+// Lives separately from Wise's own recipient list so manual-wire recipients
+// (which never get pushed to Wise) can also be saved + reused.
+
+router.get('/saved-recipients', authRequired, async (req, res) => {
+  try {
+    const where = ['is_deleted = false'];
+    const params = [];
+    if (req.query.country) { params.push(req.query.country); where.push(`country = $${params.length}`); }
+    const r = await pool.query(`
+      SELECT * FROM remittance_recipients
+       WHERE ${where.join(' AND ')}
+       ORDER BY name ASC LIMIT 500
+    `, params);
+    res.json({ rows: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/saved-recipients', authRequired, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.name) return res.status(400).json({ error: 'name required' });
+    const r = await pool.query(`
+      INSERT INTO remittance_recipients
+        (name, country, bank_name, account_type, iban, account_number,
+         routing_number, sort_code, swift_bic, branch_code,
+         city, address_line, post_code, email, legal_type,
+         wise_recipient_id, notes, payroll_item_link, created_by)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,'PRIVATE'),
+              $16,$17,$18,$19)
+      RETURNING *
+    `, [
+      b.name, b.country || null, b.bank_name || null, b.account_type || null,
+      b.iban || null, b.account_number || null,
+      b.routing_number || null, b.sort_code || null, b.swift_bic || null, b.branch_code || null,
+      b.city || null, b.address_line || null, b.post_code || null, b.email || null, b.legal_type,
+      b.wise_recipient_id || null, b.notes || null, b.payroll_item_link || null, req.user.id,
+    ]);
+
+    await logAudit({
+      action: 'remittance.recipient_saved',
+      entityType: 'remittance_recipients', entityId: r.rows[0].id,
+      userId: req.user.id,
+      metadata: { name: b.name, country: b.country, has_wise_id: !!b.wise_recipient_id },
+      ipAddress: req.ip, userAgent: req.headers['user-agent'],
+    });
+
+    res.status(201).json(r.rows[0]);
+  } catch (err) {
+    console.error('[saved recipients post]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/saved-recipients/:id', authRequired, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE remittance_recipients SET is_deleted = true, updated_at = NOW() WHERE id = $1',
+      [req.params.id]
+    );
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
