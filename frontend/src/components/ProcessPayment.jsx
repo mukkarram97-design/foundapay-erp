@@ -163,6 +163,32 @@ export default function ProcessPayment() {
     // eslint-disable-next-line
   }, [merchantId]);
 
+  // When CLIENT changes, refetch merchants filtered to that client's
+  // assigned merchants (via client_merchants junction). For super_admin
+  // viewing without a client selected, fall back to active merchants.
+  useEffect(() => {
+    const clientId = form.client_id;
+    const url = clientId
+      ? `/api/merchants?active=true&client_id=${clientId}`
+      : '/api/merchants?active=true';
+    api.get(url)
+      .then((mr) => {
+        const liveMerchants = (mr.rows || []).filter((m) => m.is_live);
+        setMerchants(liveMerchants);
+        // Auto-select default if exactly one or a flagged default exists.
+        const def = liveMerchants.find((m) => m.cm_is_default) || liveMerchants[0];
+        if (def && (!merchantId || !liveMerchants.some((m) => m.id === merchantId))) {
+          setMerchantId(def.id);
+        }
+        // If client has zero merchants assigned, clear selection.
+        if (clientId && liveMerchants.length === 0) {
+          setMerchantId('');
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line
+  }, [form.client_id]);
+
   async function refreshTodayList() {
     try {
       const r = await api.get('/api/vt/transactions');
@@ -529,12 +555,13 @@ export default function ProcessPayment() {
           {merchants.length > 0 && (
             <div style={{ marginTop: 14 }}>
               <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: 6 }}>
-                Merchant account
+                Merchant account {form.client_id && <span style={{ fontWeight: 400, textTransform: 'none', color: 'var(--text-tertiary)', letterSpacing: 0 }}>(filtered to selected client)</span>}
               </div>
               <Select value={merchantId} onChange={(e) => setMerchantId(e.target.value)}>
                 {merchants.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.processor_name} — {procLabel(m.processor_type)} {healthDot(m.health_status)}
+                    {m.cm_is_default ? ' · default' : ''}
                   </option>
                 ))}
               </Select>
@@ -543,7 +570,30 @@ export default function ProcessPayment() {
                   <AlertTriangle size={12} /> This merchant is currently unhealthy. Test before proceeding.
                 </div>
               )}
+              {/* Per-pair charge-type capability flags */}
+              {form.client_id && selectedMerchant && (
+                (selectedMerchant.cm_can_direct_charge === false ||
+                 selectedMerchant.cm_can_generate_links === false) && (
+                <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>
+                  This client–merchant pair allows:&nbsp;
+                  {[
+                    selectedMerchant.cm_can_direct_charge !== false && 'Direct Charge',
+                    selectedMerchant.cm_can_generate_links !== false && 'Payment Links',
+                    selectedMerchant.cm_can_generate_invoices !== false && 'Invoices',
+                  ].filter(Boolean).join(', ')}
+                </div>
+              ))}
             </div>
+          )}
+
+          {/* No-merchant warning when client has zero assigned */}
+          {form.client_id && merchants.length === 0 && (
+            <Alert tone="warning" className="mt-3" icon={<AlertTriangle size={14} />}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>No payment processor assigned to this client.</div>
+              <div style={{ fontSize: 12 }}>
+                Go to Clients → edit this client → "Merchant Access" to assign a merchant before charging.
+              </div>
+            </Alert>
           )}
 
           {/* Live status banner — reflects selected merchant */}

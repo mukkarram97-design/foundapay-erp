@@ -73,19 +73,49 @@ function rowToResult(row, role) {
 }
 
 // ━━━ GET / — list ━━━
+// ?active=true       → only is_live merchants
+// ?client_id=<uuid>  → only merchants assigned to that client via
+//                      client_merchants. Each row gets joined fields:
+//                      cm_is_default, cm_can_direct_charge, cm_can_generate_links,
+//                      cm_can_generate_invoices, cm_per_transaction_limit, etc.
+//                      If the client has no rows in client_merchants, returns
+//                      [] (empty list) — frontend should warn.
 router.get('/', async (req, res) => {
   try {
     const onlyActive = req.query.active === 'true';
+    const clientId = req.query.client_id || null;
     const where = ['m.is_deleted = false'];
+    const params = [];
     if (onlyActive) where.push(`m.is_live = true`);
+    if (clientId) {
+      params.push(clientId);
+      where.push(`cm.client_id = $${params.length}`);
+    }
+
+    const join = clientId
+      ? 'INNER JOIN client_merchants cm ON cm.merchant_id = m.id'
+      : 'LEFT JOIN client_merchants cm ON cm.merchant_id = m.id AND cm.client_id = NULL'; // never matches → all NULLs
+
+    const orderBy = clientId
+      ? 'cm.is_default DESC, m.processor_name'
+      : 'm.processor_name, e.legal_name';
+
     const r = await pool.query(`
-      SELECT m.*, e.legal_name AS entity_name, b.bank_name
+      SELECT m.*, e.legal_name AS entity_name, b.bank_name,
+             cm.is_default              AS cm_is_default,
+             cm.can_direct_charge       AS cm_can_direct_charge,
+             cm.can_generate_links      AS cm_can_generate_links,
+             cm.can_generate_invoices   AS cm_can_generate_invoices,
+             cm.per_transaction_limit   AS cm_per_transaction_limit,
+             cm.daily_limit             AS cm_daily_limit,
+             cm.monthly_limit           AS cm_monthly_limit
         FROM merchants m
-        LEFT JOIN entities e ON e.id = m.entity_id
-        LEFT JOIN bank_accounts b ON b.id = m.bank_account_id
+        LEFT JOIN entities e       ON e.id = m.entity_id
+        LEFT JOIN bank_accounts b  ON b.id = m.bank_account_id
+        ${join}
        WHERE ${where.join(' AND ')}
-       ORDER BY m.processor_name, e.legal_name
-    `);
+       ORDER BY ${orderBy}
+    `, params);
     res.json({ rows: r.rows.map((row) => rowToResult(row, req.user.role)) });
   } catch (err) {
     res.status(500).json({ error: err.message });
