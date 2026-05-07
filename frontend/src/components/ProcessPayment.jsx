@@ -104,8 +104,12 @@ export default function ProcessPayment() {
     expiry_minutes: 1440, // 24h default — matches new backend
     return_url: '', // optional override; backend defaults to ${PORTAL_URL}/pay/success
     brand_name: '',
+    brand_id: '',
     logo_type: 'entity',
   });
+  // Per-client brand catalog. Filled when form.client_id changes; the selected
+  // brand seeds brand_name, descriptor_note, and logo on the customer page.
+  const [brands, setBrands] = useState([]);
   const [showCustomer, setShowCustomer] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
@@ -186,6 +190,29 @@ export default function ProcessPayment() {
         }
       })
       .catch(() => {});
+    // eslint-disable-next-line
+  }, [form.client_id]);
+
+  // Load brands for the selected client. The selected brand seeds brand_name
+  // (so the customer page header matches) and the backend pulls statement
+  // descriptor + descriptor_note + logo from the brand row.
+  useEffect(() => {
+    const clientId = form.client_id;
+    if (!clientId) { setBrands([]); setForm((f) => ({ ...f, brand_id: '' })); return; }
+    api.get(`/api/clients/${clientId}/brands`)
+      .then((r) => {
+        const rows = r.rows || [];
+        setBrands(rows);
+        // Auto-pick the default brand (if any). Don't override a manual choice.
+        setForm((f) => {
+          if (f.brand_id && rows.some((b) => b.id === f.brand_id)) return f;
+          const def = rows.find((b) => b.is_default) || rows[0];
+          return def
+            ? { ...f, brand_id: def.id, brand_name: def.name }
+            : { ...f, brand_id: '' };
+        });
+      })
+      .catch(() => setBrands([]));
     // eslint-disable-next-line
   }, [form.client_id]);
 
@@ -486,6 +513,7 @@ export default function ProcessPayment() {
           client_id: form.client_id || null,
           entity_id: form.entity_id || null,
           brand_name: form.brand_name || authConfig?.entity || 'FoundaPay',
+          brand_id: form.brand_id || null,
           logo_type: form.logo_type,
           expiry_minutes: parseInt(form.expiry_minutes, 10),
           method: 'self_hosted',
@@ -730,7 +758,67 @@ export default function ProcessPayment() {
         {chargeType !== 'invoice' && (
         <Card className="p-5">
           <SectionTitle>Branding (shown on payment page)</SectionTitle>
-          <div className="grid grid-cols-2 gap-3 mt-2">
+          {form.client_id && brands.length > 0 && (
+            <div className="mt-2">
+              <Label>Brand</Label>
+              <Select
+                value={form.brand_id}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  const b = brands.find((x) => x.id === id);
+                  setForm((f) => ({
+                    ...f,
+                    brand_id: id,
+                    brand_name: b?.name || f.brand_name,
+                  }));
+                }}
+              >
+                <option value="">— No brand override —</option>
+                {brands.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}{b.is_default ? ' (default)' : ''}
+                  </option>
+                ))}
+              </Select>
+              {form.brand_id && (() => {
+                const b = brands.find((x) => x.id === form.brand_id);
+                if (!b) return null;
+                return (
+                  <div style={{
+                    marginTop: 8, padding: '8px 10px',
+                    background: 'var(--bg-tertiary)', borderRadius: 8,
+                    border: '1px solid var(--border)', fontSize: 12,
+                    color: 'var(--text-secondary)', lineHeight: 1.5,
+                  }}>
+                    {b.statement_descriptor && (
+                      <div>
+                        <strong>Statement descriptor:</strong>{' '}
+                        <code style={{ fontFamily: 'ui-monospace, monospace', background: 'var(--bg-secondary)', padding: '1px 5px', borderRadius: 4 }}>
+                          {b.statement_descriptor}
+                        </code>
+                      </div>
+                    )}
+                    {b.descriptor_note && (
+                      <div style={{ marginTop: 4 }}>
+                        <strong>Customer note:</strong> {b.descriptor_note}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+          {form.client_id && brands.length === 0 && (
+            <div style={{
+              marginTop: 8, padding: '8px 10px',
+              background: 'var(--bg-tertiary)', borderRadius: 8,
+              fontSize: 12, color: 'var(--text-tertiary)',
+            }}>
+              No brands configured for this client.{' '}
+              <span style={{ color: 'var(--text-secondary)' }}>Add one under Clients → Brands to drive statement-descriptor display + chargeback-mitigation notes.</span>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3 mt-3">
             <div>
               <Label>Logo</Label>
               <Select value={form.logo_type} onChange={(e) => setForm((f) => ({ ...f, logo_type: e.target.value }))}>

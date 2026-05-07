@@ -269,10 +269,22 @@ router.post('/generate-link', async (req, res) => {
       }
     }
 
-    // Resolve logo from entity > client (entity takes priority since it's the
-    // brand owner; client is a fallback for org-level branding).
-    let logoUrl = null;
-    if (b.entity_id) {
+    // ━━━ Brand resolution ━━━
+    // If a brand_id was passed in we use that brand's name + logo + descriptor
+    // verbatim. Otherwise we fall back to the legacy resolution: entity logo →
+    // client logo → AUTHNET_ENTITY env. Brand-driven flow gives operators
+    // explicit control + descriptor_note for chargeback mitigation.
+    let brand = null;
+    if (b.brand_id) {
+      const br = await pool.query(
+        `SELECT id, name, logo_url, brand_color, statement_descriptor, descriptor_note,
+                support_email, support_phone
+           FROM client_brands
+          WHERE id = $1 AND is_archived = false`, [b.brand_id]);
+      brand = br.rows[0] || null;
+    }
+    let logoUrl = brand?.logo_url || null;
+    if (!logoUrl && b.entity_id) {
       const e = await pool.query('SELECT logo_url FROM entities WHERE id = $1', [b.entity_id]);
       logoUrl = e.rows[0]?.logo_url || null;
     }
@@ -280,6 +292,7 @@ router.post('/generate-link', async (req, res) => {
       const c = await pool.query('SELECT logo_url FROM clients WHERE id = $1', [b.client_id]);
       logoUrl = c.rows[0]?.logo_url || null;
     }
+    const brandName = brand?.name || b.brand_name || process.env.AUTHNET_ENTITY || 'FoundaPay';
 
     // Always emits our /pay/:token wrapper. Upstream Authorize.net token is
     // regenerated lazily on each customer click — see GET /pay/:token in
@@ -289,12 +302,20 @@ router.post('/generate-link', async (req, res) => {
       description: b.description,
       invoiceNumber: b.invoiceNumber,
       email: b.customer_email,
-      brandName: b.brand_name || process.env.AUTHNET_ENTITY || 'FoundaPay',
-      logoUrl, // resolved above; null = fall back to text brand on payment page
-      expiryMinutes: parseInt(b.expiry_minutes || 1440, 10), // 24h default
-      method: b.method || 'self_hosted', // 'self_hosted' renders our Accept.js page; 'auto' / 'hosted_redirect' use Authorize.net hosted page
+      brandName,
+      logoUrl,
+      expiryMinutes: parseInt(b.expiry_minutes || 1440, 10),
+      method: b.method || 'self_hosted',
       returnUrl: b.return_url || 'https://portal.foundapay.com',
-      invoiceId: b.invoice_id || null, // when set, GET /pay/:token renders the detailed invoice page
+      invoiceId: b.invoice_id || null,
+      // Brand fields baked into the token so /pay/:token can render them
+      // without re-querying the DB.
+      brandId: brand?.id || null,
+      brandColor: brand?.brand_color || null,
+      statementDescriptor: brand?.statement_descriptor || null,
+      descriptorNote: brand?.descriptor_note || null,
+      supportEmail: brand?.support_email || null,
+      supportPhone: brand?.support_phone || null,
     });
 
     if (!result.success) return res.status(502).json({ success: false, error: result.message });
@@ -309,8 +330,8 @@ router.post('/generate-link', async (req, res) => {
         (processor, hosted_link_url, hosted_link_token, hosted_link_expires_at,
          amount, charge_type, status, charged_by,
          client_id, entity_id, invoice_number, description,
-         customer_email, logo_type, brand_name)
-      VALUES ('authorize_net',$1,$2,$3,$4,'hosted_link','pending',$5,$6,$7,$8,$9,$10,$11,$12)
+         customer_email, logo_type, brand_name, brand_id)
+      VALUES ('authorize_net',$1,$2,$3,$4,'hosted_link','pending',$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING id
     `, [
       result.hostedUrl, result.token, result.expiresAt,
@@ -318,18 +339,19 @@ router.post('/generate-link', async (req, res) => {
       req.user.id, b.client_id || null, b.entity_id || null,
       b.invoiceNumber || null, b.description || null,
       b.customer_email || null, b.logo_type || 'entity',
-      b.brand_name || null,
+      brandName, brand?.id || null,
     ]);
 
     // Mirror into payment_link_requests so the existing Payment Links page sees it
     if (b.client_id) {
       await pool.query(`
         INSERT INTO payment_link_requests
-          (client_id, amount, payment_method, entity_id, processor_link, status, description, invoice_number, created_by, link_generated_at)
-        VALUES ($1, $2, 'Debit/Credit Cards', $3, $4, 'link_generated', $5, $6, $7, NOW())
+          (client_id, amount, payment_method, entity_id, processor_link, status, description, invoice_number, brand_id, created_by, link_generated_at)
+        VALUES ($1, $2, 'Debit/Credit Cards', $3, $4, 'link_generated', $5, $6, $7, $8, NOW())
       `, [
         b.client_id, parseFloat(b.amount).toFixed(2), b.entity_id || null,
-        result.hostedUrl, b.description || null, b.invoiceNumber || null, req.user.id,
+        result.hostedUrl, b.description || null, b.invoiceNumber || null,
+        brand?.id || null, req.user.id,
       ]);
     }
 

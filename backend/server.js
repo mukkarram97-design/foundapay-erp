@@ -36,6 +36,7 @@ const approvalsRoutes       = require('./src/routes/approvals');
 const wiseRoutes            = require('./src/routes/wise');
 const permissionsRoutes     = require('./src/routes/permissions');
 const settingsRoutes        = require('./src/routes/settings');
+const brandsRoutes          = require('./src/routes/brands');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -63,6 +64,7 @@ app.get('/api/health', async (req, res) => {
 app.use('/api/auth',           authRoutes);
 app.use('/api/portal',         portalRoutes);
 app.use('/api/transactions',   transactionsRoutes);
+app.use('/api/clients/:client_id/brands', brandsRoutes);
 app.use('/api/clients',        clientsRoutes);
 app.use('/api/entities',       entitiesRoutes);
 app.use('/api/merchants',      merchantsRoutes);

@@ -95,13 +95,23 @@ async function checkPaymentCloud(creds) {
   return { status: 'unknown', message: 'PaymentCloud live test not yet implemented — credentials stored.' };
 }
 
-// Authorize.net — uses the already-configured global service. Ignores per-merchant
-// creds for now since the service reads from .env. Future: thread merchant creds
-// through authNet.testConnection().
-async function checkAuthnet() {
+// Authorize.net — reads creds from per-merchant api_credentials JSONB so each
+// authnet merchant can be tested independently. Falls back to .env values
+// (AUTHNET_LOGIN_ID / AUTHNET_TRANSACTION_KEY / AUTHNET_SANDBOX) when the
+// merchant row doesn't carry creds yet — keeps legacy single-merchant setups
+// working until they're migrated.
+async function checkAuthnet(creds, isSandbox) {
+  const loginId        = creds?.loginId        || process.env.AUTHNET_LOGIN_ID;
+  const transactionKey = creds?.transactionKey || process.env.AUTHNET_TRANSACTION_KEY;
+  const sandbox        = creds?.sandbox != null ? !!creds.sandbox : (isSandbox ?? (process.env.AUTHNET_SANDBOX === 'true'));
+
+  if (!loginId || !transactionKey) {
+    return { status: 'unconfigured', message: 'Add Authorize.net loginId + transactionKey to activate' };
+  }
+
   const start = Date.now();
   try {
-    const r = await authNet.testConnection();
+    const r = await authNet.testConnectionWithCreds({ loginId, transactionKey, sandbox });
     const latency = Date.now() - start;
     if (r.success) {
       return { status: latency > 2000 ? 'slow' : 'healthy', latency, message: r.message || `Connected (${latency}ms)` };
@@ -115,7 +125,7 @@ async function checkAuthnet() {
 async function runHealthCheck(processorType, creds, { isSandbox = false } = {}) {
   const t = String(processorType || '').toLowerCase();
   switch (t) {
-    case 'authnet':       return checkAuthnet(creds);
+    case 'authnet':       return checkAuthnet(creds, isSandbox);
     case 'stripe':        return checkStripe(creds);
     case 'square':        return checkSquare(creds, isSandbox);
     case 'paypal':        return checkPaypal(creds, isSandbox);

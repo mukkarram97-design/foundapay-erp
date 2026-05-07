@@ -370,6 +370,38 @@ async function testConnection() {
   }
 }
 
+// authenticateTestRequest with explicit credentials — used by per-merchant
+// health checks so each Authorize.net merchant can be tested independently
+// against its own loginId/transactionKey rather than the global .env values.
+async function testConnectionWithCreds({ loginId, transactionKey, sandbox } = {}) {
+  if (!loginId || !transactionKey) {
+    return { success: false, message: 'Missing loginId or transactionKey' };
+  }
+  const endpoint = sandbox
+    ? 'https://apitest.authorize.net/xml/v1/request.api'
+    : 'https://api.authorize.net/xml/v1/request.api';
+  const payload = {
+    authenticateTestRequest: {
+      merchantAuthentication: { name: loginId, transactionKey },
+    },
+  };
+  try {
+    const res = await axios.post(endpoint, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      transformResponse: [(d) => d],
+      timeout: 30000,
+    });
+    const data = parseAuthnetResponse(res.data);
+    return {
+      success: data.messages?.resultCode === 'Ok',
+      message: data.messages?.message?.[0]?.text || 'Connected',
+      sandbox: !!sandbox,
+    };
+  } catch (e) {
+    return { success: false, message: e.message };
+  }
+}
+
 // ━━━ 7. WEBHOOK SIGNATURE VERIFICATION ───────────────────
 function verifySignature(payload, signature) {
   if (!process.env.AUTHNET_SIGNATURE_KEY || !signature) return false;
@@ -526,6 +558,16 @@ async function generatePaymentLink(params) {
     logoUrl: params.logoUrl || null,
     returnUrl: params.returnUrl || null,
     method,
+    // Brand surface — when the operator picked a brand_id, these are
+    // baked into the JWT so /pay/:token can render the brand identity
+    // and the chargeback-mitigation descriptor_note without re-querying
+    // the DB on each customer click.
+    brandId: params.brandId || null,
+    statementDescriptor: params.statementDescriptor || null,
+    descriptorNote: params.descriptorNote || null,
+    brandColor: params.brandColor || null,
+    supportEmail: params.supportEmail || null,
+    supportPhone: params.supportPhone || null,
     // Invoice bridge — only set when generated from the Invoice flow.
     // GET /pay/:token uses this to render the detailed invoice page.
     invoiceId: params.invoiceId || null,
@@ -553,6 +595,7 @@ module.exports = {
   refundTransaction,
   getTransactionDetails,
   testConnection,
+  testConnectionWithCreds,
   verifySignature,
   signPayload,
   verifyToken,

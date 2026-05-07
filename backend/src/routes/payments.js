@@ -562,6 +562,15 @@ router.get('/pay/:token', async (req, res) => {
     <div class="meta">${esc(payload.description || 'Payment')}</div>
     <div class="invoice">Invoice: ${esc(payload.invoiceNumber)}</div>
 
+    ${payload.descriptorNote || payload.statementDescriptor ? `
+    <div style="margin-top:18px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;font-size:12px;color:#9a3412;line-height:1.45">
+      ${payload.statementDescriptor
+        ? `<div style="font-weight:600;margin-bottom:2px">Charge will appear as <code style="font-family:ui-monospace,monospace;background:#fde68a;padding:1px 5px;border-radius:4px">${esc(payload.statementDescriptor)}</code> on your statement</div>`
+        : ''}
+      ${payload.descriptorNote ? `<div>${esc(payload.descriptorNote)}</div>` : ''}
+    </div>
+    ` : ''}
+
     <div class="pay-row">
       <button
         type="button"
@@ -581,6 +590,9 @@ router.get('/pay/:token', async (req, res) => {
 
     <div class="secure" style="margin-top:24px">🔒 <b>Card data is sent directly to Authorize.net.</b></div>
     <div class="secure" style="margin-top:4px">Your card never touches FoundaPay's servers.</div>
+    ${payload.supportEmail || payload.supportPhone ? `
+    <div class="secure" style="margin-top:10px">Questions? ${payload.supportEmail ? `<a href="mailto:${esc(payload.supportEmail)}" style="color:#7c3aed;text-decoration:none">${esc(payload.supportEmail)}</a>` : ''}${payload.supportEmail && payload.supportPhone ? ' · ' : ''}${payload.supportPhone ? esc(payload.supportPhone) : ''}</div>
+    ` : ''}
     <div class="secure" style="margin-top:14px">Powered by <b>FoundaPay</b></div>
   </div>
 
