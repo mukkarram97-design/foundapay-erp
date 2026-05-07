@@ -75,6 +75,7 @@ export default function Remittance() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [openTransfer, setOpenTransfer] = useState(false);
+  const [detailRow, setDetailRow] = useState(null);
 
   async function loadRows() {
     setLoading(true);
@@ -196,7 +197,7 @@ export default function Remittance() {
               const sd = STATUS_DISPLAY[r.status] || { label: r.status, tone: 'neutral' };
               const ch = CHANNEL_LABEL[r.provider || 'wise'] || CHANNEL_LABEL.wise;
               return (
-                <Tr key={r.id}>
+                <Tr key={r.id} clickable onClick={() => setDetailRow(r)}>
                   <Td className="text-xs">{dateOnly(r.created_at)}</Td>
                   <Td><Badge tone="info">{ch.icon} {ch.label}</Badge></Td>
                   <Td>
@@ -208,8 +209,11 @@ export default function Remittance() {
                   <Td className="text-right font-mono">{r.exchange_rate ? Number(r.exchange_rate).toFixed(4) : '—'}</Td>
                   <Td className="text-right font-mono">{r.wise_fee != null ? money(r.wise_fee, r.source_currency) : (r.provider_fee != null ? money(r.provider_fee, r.source_currency) : '—')}</Td>
                   <Td><Badge tone={sd.tone}>{sd.label}</Badge></Td>
-                  <Td>
+                  <Td onClick={(e) => e.stopPropagation()}>
                     <div className="flex gap-1 flex-wrap items-center">
+                      <Button size="sm" variant="ghost" onClick={() => setDetailRow(r)} title="Open detail + live timeline">
+                        👁 Track
+                      </Button>
                       {(r.provider || 'wise') === 'wise' && r.status === 'transfer_created' && isSuper && (
                         <Button size="sm" variant="success" onClick={() => fundOne(r)}>Fund</Button>
                       )}
@@ -242,6 +246,17 @@ export default function Remittance() {
           providers={providers}
           onClose={() => setOpenTransfer(false)}
           onCreated={() => { setOpenTransfer(false); loadRows(); }}
+        />
+      )}
+
+      {detailRow && (
+        <TransferDetailSlideOver
+          row={detailRow}
+          isSuper={isSuper}
+          onClose={() => setDetailRow(null)}
+          onChanged={() => { loadRows(); }}
+          onUploadProof={(file) => uploadProofFor(detailRow, file)}
+          onFund={() => fundOne(detailRow)}
         />
       )}
     </div>
@@ -982,6 +997,273 @@ function Row({ label, value, bold }) {
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontWeight: bold ? 600 : 400 }}>
       <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
       <span style={{ fontFamily: 'ui-monospace, monospace' }}>{value}</span>
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Transfer detail slide-over with live status polling.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Wise status → human label + tone for the status badge.
+const WISE_STATUS_LABELS = {
+  incoming_payment_waiting:   { label: 'Waiting for funds',     tone: 'warning', icon: '⏳' },
+  incoming_payment_initiated: { label: 'Funds received',         tone: 'info',    icon: '💰' },
+  processing:                 { label: 'Processing transfer',    tone: 'info',    icon: '🔄' },
+  funds_converted:            { label: 'Currency converted',     tone: 'info',    icon: '💱' },
+  outgoing_payment_sent:      { label: 'Payment sent',           tone: 'success', icon: '✅' },
+  bounced_back:               { label: 'Bounced back',           tone: 'danger',  icon: '↩️' },
+  cancelled:                  { label: 'Cancelled',              tone: 'neutral', icon: '✕' },
+  funds_refunded:             { label: 'Refunded',               tone: 'danger',  icon: '🔙' },
+  charged_back:               { label: 'Charged back',           tone: 'danger',  icon: '⚠️' },
+};
+
+function TransferDetailSlideOver({ row: initialRow, isSuper, onClose, onChanged, onUploadProof, onFund }) {
+  const [row, setRow] = useState(initialRow);
+  const [wise, setWise] = useState(null);
+  const [trackingUrl, setTrackingUrl] = useState(initialRow.wise_tracking_url || null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastSync, setLastSync] = useState(null);
+  const [secondsLeft, setSecondsLeft] = useState(30);
+  const isWise = (row.provider || 'wise') === 'wise';
+  const inProgress = !['completed', 'cancelled', 'failed'].includes(row.status);
+
+  async function refreshStatus() {
+    if (!isWise || !row.wise_transfer_id) return;
+    setRefreshing(true);
+    try {
+      const r = await api.get(`/api/wise/transfer/${row.id}/status`);
+      if (r.remittance) setRow(r.remittance);
+      if (r.wise) setWise(r.wise);
+      setLastSync(new Date());
+      onChanged?.();
+    } catch (e) { /* surface errors lightly */ console.warn('[track refresh]', e.message); }
+    finally { setRefreshing(false); }
+  }
+
+  async function loadTrackingUrl() {
+    if (!isWise || !row.wise_transfer_id) return;
+    try {
+      const r = await api.get(`/api/wise/transfer/${row.id}/tracking`);
+      if (r.trackingUrl) setTrackingUrl(r.trackingUrl);
+    } catch (e) { /* non-fatal */ }
+  }
+
+  // First load + auto-poll every 30s while in progress
+  useEffect(() => {
+    refreshStatus();
+    loadTrackingUrl();
+    if (!inProgress || !isWise) return;
+    const tick = setInterval(refreshStatus, 30_000);
+    const counter = setInterval(() => setSecondsLeft((s) => (s <= 1 ? 30 : s - 1)), 1000);
+    return () => { clearInterval(tick); clearInterval(counter); };
+    // eslint-disable-next-line
+  }, [row.id, inProgress, isWise]);
+
+  function downloadReceipt() {
+    if (!isWise) return;
+    const token = localStorage.getItem('foundapay_token');
+    fetch(`/api/wise/transfer/${row.id}/receipt`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.blob() : r.json().then((j) => Promise.reject(new Error(j.error || 'Receipt download failed'))))
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `FoundaPay-Remittance-${row.wise_transfer_id}-${(row.recipient_name || 'recipient').replace(/[^A-Za-z0-9]+/g, '_')}.pdf`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      })
+      .catch((e) => toast.error(e.message));
+  }
+
+  // Build a unified timeline: created → funded → wise events (from row.timeline)
+  // and synthetic fallback events when timeline is empty.
+  const events = useMemo(() => {
+    const stored = Array.isArray(row.timeline) ? row.timeline
+      : (typeof row.timeline === 'string' ? (() => { try { return JSON.parse(row.timeline); } catch { return []; } })() : []);
+    const evts = [...stored];
+    // Always include the structural milestones derived from columns
+    if (row.created_at)   evts.unshift({ event: 'created',   at: row.created_at,   description: 'Transfer created' });
+    if (row.funded_at)    evts.push({ event: 'funded',     at: row.funded_at,     description: 'Funded by Nextgenase Inc' });
+    if (row.completed_at) evts.push({ event: 'completed',  at: row.completed_at,  description: 'Outgoing payment sent' });
+    if (row.failed_at)    evts.push({ event: 'failed',     at: row.failed_at,     description: row.failure_reason || 'Transfer failed' });
+    // Sort + dedupe by event+at
+    const seen = new Set();
+    return evts
+      .filter((e) => e?.at)
+      .filter((e) => { const k = `${e.event}@${e.at}`; if (seen.has(k)) return false; seen.add(k); return true; })
+      .sort((a, b) => new Date(a.at) - new Date(b.at));
+  }, [row]);
+
+  const wiseStatus = row.wise_status ? WISE_STATUS_LABELS[String(row.wise_status).toLowerCase()] : null;
+  const headerStatus = wiseStatus || (STATUS_DISPLAY[row.status] || { label: row.status, tone: 'neutral' });
+
+  const channel = CHANNEL_LABEL[row.provider || 'wise'] || CHANNEL_LABEL.wise;
+
+  return (
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)', zIndex: 1100, display: 'flex', justifyContent: 'flex-end' }}>
+      <div className="fp-card" style={{ width: '100%', maxWidth: 880, height: '100vh', overflowY: 'auto', borderRadius: 0, padding: 24 }}>
+        <div className="flex items-start justify-between mb-4">
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {channel.icon} {channel.label} transfer
+            </div>
+            <h2 style={{ fontSize: 22, fontWeight: 700, marginTop: 4 }}>
+              Transfer to {row.recipient_name || '—'}
+            </h2>
+            <div className="mt-1 flex items-center gap-2 flex-wrap">
+              <Badge tone={headerStatus.tone}>{headerStatus.icon || ''} {headerStatus.label}</Badge>
+              {row.wise_transfer_id && (
+                <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'ui-monospace, monospace' }}>
+                  Wise #{row.wise_transfer_id}
+                </span>
+              )}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 22 }}>×</button>
+        </div>
+
+        <div className="grid gap-4" style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' }}>
+          {/* LEFT — details + actions */}
+          <div>
+            <Card className="p-4 mb-3">
+              <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em', marginBottom: 8 }}>Amounts</div>
+              <Row label="Sent" value={money(row.source_amount, row.source_currency)} bold />
+              <Row label="Recipient gets" value={money(row.target_amount, row.target_currency)} bold />
+              {row.exchange_rate && <Row label="Exchange rate" value={`1 ${row.source_currency} = ${Number(row.exchange_rate).toFixed(4)} ${row.target_currency}`} />}
+              {row.wise_fee != null && <Row label="Wise fee" value={money(row.wise_fee, row.source_currency)} />}
+              {row.provider_fee != null && <Row label="Bank fee" value={money(row.provider_fee, row.source_currency)} />}
+              {row.wise_fee != null && (
+                <Row label="Total debited"
+                  value={money((parseFloat(row.source_amount) || 0) + (parseFloat(row.wise_fee) || 0), row.source_currency)}
+                  bold />
+              )}
+            </Card>
+
+            <Card className="p-4 mb-3">
+              <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em', marginBottom: 8 }}>Recipient</div>
+              <Row label="Name" value={row.recipient_name || '—'} />
+              {row.recipient_bank && <Row label="Bank" value={row.recipient_bank} />}
+              {row.recipient_account && (
+                <Row label={row.recipient_account.startsWith('PK') ? 'IBAN' : 'Account'}
+                  value={`••${String(row.recipient_account).slice(-4)}`} />
+              )}
+              {row.recipient_country && <Row label="Country" value={row.recipient_country} />}
+              {row.purpose && <Row label="Purpose" value={row.purpose} />}
+              {row.reference && <Row label="Reference" value={row.reference} />}
+              {row.created_at && <Row label="Created" value={new Date(row.created_at).toLocaleString()} />}
+              {row.funded_at && <Row label="Funded" value={new Date(row.funded_at).toLocaleString()} />}
+              {row.completed_at && <Row label="Completed" value={new Date(row.completed_at).toLocaleString()} />}
+            </Card>
+
+            <Card className="p-4">
+              <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em', marginBottom: 8 }}>Actions</div>
+              <div className="flex flex-wrap gap-2">
+                {isWise && (
+                  <Button variant="secondary" onClick={downloadReceipt}>📄 Download Receipt PDF</Button>
+                )}
+                {trackingUrl && (
+                  <Button variant="secondary" onClick={() => window.open(trackingUrl, '_blank')}>
+                    🔗 Open Wise Tracking Link
+                  </Button>
+                )}
+                {isWise && row.wise_transfer_id && (
+                  <Button variant="secondary" onClick={() => window.open(`https://wise.com/transfer/${row.wise_transfer_id}`, '_blank')}>
+                    ↗ View on Wise
+                  </Button>
+                )}
+                {isWise && row.status === 'transfer_created' && isSuper && (
+                  <Button variant="success" onClick={onFund}>💸 Fund transfer</Button>
+                )}
+                {!isWise && !['completed', 'cancelled'].includes(row.status) && (
+                  <label className="fp-btn fp-btn-secondary" style={{ cursor: 'pointer' }}>
+                    📎 {row.proof_url ? 'Replace proof' : 'Upload proof'}
+                    <input type="file" hidden accept=".pdf,.png,.jpg,.jpeg"
+                      onChange={(e) => e.target.files[0] && (onUploadProof(e.target.files[0]), onClose())} />
+                  </label>
+                )}
+                <Button variant="ghost" onClick={refreshStatus} disabled={refreshing}>
+                  🔄 {refreshing ? 'Refreshing…' : 'Refresh status'}
+                </Button>
+              </div>
+              {isWise && inProgress && (
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>
+                  Auto-refresh every 30s · next in {secondsLeft}s
+                </div>
+              )}
+              {lastSync && (
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                  Last synced: {lastSync.toLocaleTimeString()}
+                </div>
+              )}
+            </Card>
+          </div>
+
+          {/* RIGHT — live timeline */}
+          <div>
+            <Card className="p-4">
+              <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em', marginBottom: 12 }}>
+                Live timeline
+              </div>
+              {events.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>No events yet.</div>
+              ) : (
+                <div style={{ position: 'relative', paddingLeft: 16 }}>
+                  <div style={{ position: 'absolute', left: 5, top: 4, bottom: 4, width: 2, background: 'var(--border)', borderRadius: 1 }} />
+                  {events.map((ev, i) => {
+                    const cfg = WISE_STATUS_LABELS[String(ev.event).toLowerCase()] || {
+                      label: ev.description || ev.event, icon: '•', tone: 'neutral',
+                    };
+                    const dotColor = ({
+                      success: 'var(--success)',
+                      warning: 'var(--warning)',
+                      danger:  'var(--danger)',
+                      info:    'var(--info)',
+                      neutral: 'var(--text-tertiary)',
+                    })[cfg.tone] || 'var(--accent)';
+                    return (
+                      <div key={i} style={{ position: 'relative', paddingBottom: i === events.length - 1 ? 0 : 14 }}>
+                        <div style={{
+                          position: 'absolute', left: -15, top: 4,
+                          width: 12, height: 12, borderRadius: '50%',
+                          background: dotColor,
+                          boxShadow: '0 0 0 3px var(--bg-secondary)',
+                        }} />
+                        <div style={{ fontSize: 13, lineHeight: 1.3, color: 'var(--text-primary)' }}>
+                          <span style={{ fontSize: 14, marginRight: 4 }}>{cfg.icon}</span>
+                          <strong>{cfg.label}</strong>
+                        </div>
+                        {ev.description && cfg.label !== ev.description && (
+                          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>{ev.description}</div>
+                        )}
+                        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                          {new Date(ev.at).toLocaleString()}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {inProgress && isWise && (
+                <div style={{ marginTop: 12, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-tertiary)', fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span className="fp-spin" style={{ display: 'inline-block', width: 12, height: 12, border: '2px solid currentColor', borderTopColor: 'transparent', borderRadius: '50%' }} />
+                  Tracking in real time
+                </div>
+              )}
+            </Card>
+
+            {row.transaction_id && (
+              <Card className="p-3 mt-3">
+                <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em', marginBottom: 4 }}>Master Ledger</div>
+                <a href={`/transactions?tx=${row.transaction_id}`} style={{ fontSize: 12, color: 'var(--accent)' }}>
+                  View transaction #{row.transaction_id} →
+                </a>
+              </Card>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

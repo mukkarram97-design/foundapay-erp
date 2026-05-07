@@ -137,6 +137,31 @@ async function getReceipt(transferId) {
   return `${baseUrlFor(cfg.env)}/v1/transfers/${transferId}/receipt.pdf`;
 }
 
+// Fetch the Wise PDF receipt as a binary stream we can pipe through to the
+// frontend. Returns { buffer, contentType } or throws.
+async function getReceiptPdf(transferId) {
+  const cfg = await loadConfig();
+  if (!cfg.token) throw new Error('Wise not configured');
+  const r = await fetch(`${baseUrlFor(cfg.env)}/v3/profiles/${cfg.profileId}/transfers/${transferId}/receipt.pdf`, {
+    headers: { 'Authorization': `Bearer ${cfg.token}`, 'Accept': 'application/pdf' },
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    const e = new Error(`Wise receipt fetch failed: HTTP ${r.status} ${body.slice(0, 200)}`);
+    e.status = r.status;
+    throw e;
+  }
+  const arrayBuffer = await r.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), contentType: r.headers.get('content-type') || 'application/pdf' };
+}
+
+// /v1/transfers/:id/payments returns the payment timeline + tracking link.
+// Wise's response shape varies by transfer state — return raw and let the
+// route layer extract trackingUrl + events.
+async function getPayments(transferId) {
+  return request('GET', `/v1/transfers/${transferId}/payments`);
+}
+
 module.exports = {
   isConfigured,
   invalidateCache,
@@ -148,5 +173,7 @@ module.exports = {
   createTransfer,
   fundTransfer,
   getTransfer,
+  getPayments,
   getReceipt,
+  getReceiptPdf,
 };

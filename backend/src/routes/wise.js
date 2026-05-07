@@ -298,20 +298,62 @@ router.post('/transfer', requireConfigured, async (req, res) => {
   }
 });
 
+// Map a Wise transfer status string to our internal high-level state.
+// Wise emits: incoming_payment_waiting, incoming_payment_initiated,
+//   processing, funds_converted, outgoing_payment_sent, bounced_back,
+//   cancelled, funds_refunded, charged_back.
+function mapWiseStatus(s) {
+  const v = String(s || '').toLowerCase();
+  if (['outgoing_payment_sent', 'funds_converted', 'paid'].includes(v)) return 'completed';
+  if (['cancelled'].includes(v)) return 'cancelled';
+  if (['bounced_back', 'funds_refunded', 'charged_back'].includes(v)) return 'failed';
+  if (['incoming_payment_waiting', 'pending'].includes(v)) return 'transfer_created';
+  return 'processing';
+}
+
+// Append a timeline event to remittances.timeline if not already present.
+// Idempotent on (event + at) so polling doesn't dupe rows.
+async function appendTimelineEvent(client, remittanceId, evt) {
+  await client.query(`
+    UPDATE remittances
+       SET timeline = COALESCE(timeline, '[]'::jsonb) || $1::jsonb
+     WHERE id = $2
+       AND NOT (
+         COALESCE(timeline, '[]'::jsonb) @> jsonb_build_array(
+           jsonb_build_object('event', $1::jsonb->0->>'event', 'at', $1::jsonb->0->>'at')
+         )
+       )
+  `, [JSON.stringify([evt]), remittanceId]);
+}
+
 // ━━━ POST /transfer/:id/fund — actually send the money ━━━
 router.post('/transfer/:id/fund', requireSuper, requireConfigured, async (req, res) => {
+  const c = await pool.connect();
   try {
-    const cur = await pool.query('SELECT * FROM remittances WHERE id = $1', [req.params.id]);
+    const cur = await c.query('SELECT * FROM remittances WHERE id = $1', [req.params.id]);
     if (!cur.rows.length) return res.status(404).json({ error: 'Not found' });
     const r = cur.rows[0];
     if (!r.wise_transfer_id) return res.status(400).json({ error: 'No Wise transfer ID' });
 
     const result = await wise.fundTransfer(r.wise_transfer_id);
-    await pool.query(`
+
+    await c.query('BEGIN');
+    await c.query(`
       UPDATE remittances
-         SET status = 'processing', wise_status = $1, approved_by = $2, approved_at = NOW(), updated_at = NOW()
+         SET status = 'processing', wise_status = $1,
+             approved_by = $2, approved_at = NOW(),
+             funded_at = COALESCE(funded_at, NOW()),
+             updated_at = NOW()
        WHERE id = $3
     `, [result?.status || result?.errorCode || 'FUNDED', req.user.id, req.params.id]);
+
+    await appendTimelineEvent(c, req.params.id, {
+      event: 'funded',
+      at: new Date().toISOString(),
+      description: `Funded by ${req.user.name || req.user.email}`,
+      actor: req.user.id,
+    });
+    await c.query('COMMIT');
 
     await logAudit({
       action: 'wise.transfer_funded', entityType: 'remittances', entityId: req.params.id,
@@ -326,27 +368,112 @@ router.post('/transfer/:id/fund', requireSuper, requireConfigured, async (req, r
 
     res.json({ ok: true, result });
   } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
     console.error('[wise fund]', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// ━━━ GET /transfer/:id/status — fetch live Wise status, persist, return enriched ━━━
+router.get('/transfer/:id/status', requireConfigured, async (req, res) => {
+  const c = await pool.connect();
+  try {
+    const cur = await c.query('SELECT * FROM remittances WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length || !cur.rows[0].wise_transfer_id) return res.status(404).json({ error: 'Not found' });
+    const row = cur.rows[0];
+
+    const w = await wise.getTransfer(row.wise_transfer_id);
+    const internalStatus = mapWiseStatus(w.status);
+    const completed = internalStatus === 'completed';
+    const failed    = internalStatus === 'failed';
+
+    await c.query('BEGIN');
+    await c.query(`
+      UPDATE remittances
+         SET wise_status = $1, status = $2,
+             completed_at = CASE WHEN $3::boolean AND completed_at IS NULL THEN NOW() ELSE completed_at END,
+             failed_at    = CASE WHEN $4::boolean AND failed_at    IS NULL THEN NOW() ELSE failed_at END,
+             failure_reason = CASE WHEN $4::boolean THEN COALESCE(failure_reason, $5) ELSE failure_reason END,
+             last_status_check = NOW(),
+             updated_at = NOW()
+       WHERE id = $6
+    `, [w.status, internalStatus, completed, failed, w.errorCode || null, req.params.id]);
+
+    // Push the current Wise status as a timeline entry (idempotent).
+    await appendTimelineEvent(c, req.params.id, {
+      event: w.status,
+      at: new Date().toISOString(),
+      description: `Wise: ${w.status}`,
+    });
+
+    // On completion, flip the linked transactions row to Completed and the
+    // payroll_item (if linked) to paid — same effect as /:id/fund did for the
+    // funding step, but for the actual outgoing-payment-sent step.
+    if (completed) {
+      if (row.transaction_id) {
+        await c.query(`UPDATE transactions SET status='Completed', updated_at=NOW() WHERE id=$1 AND status<>'Completed'`, [row.transaction_id]).catch(() => {});
+      }
+      if (row.payroll_item_id) {
+        await c.query(`UPDATE salary_items SET status='paid', paid_at=COALESCE(paid_at, NOW()) WHERE id=$1`, [row.payroll_item_id]).catch(() => {});
+      }
+    }
+    await c.query('COMMIT');
+
+    // Reload to return the persisted shape (timeline included).
+    const after = await c.query('SELECT * FROM remittances WHERE id = $1', [req.params.id]);
+    res.json({ wise: w, remittance: after.rows[0] });
+  } catch (err) {
+    try { await c.query('ROLLBACK'); } catch {}
+    console.error('[wise status]', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  } finally {
+    c.release();
+  }
+});
+
+// ━━━ GET /transfer/:id/tracking — extract recipient-facing tracking URL ━━━
+router.get('/transfer/:id/tracking', requireConfigured, async (req, res) => {
+  try {
+    const cur = await pool.query('SELECT wise_transfer_id, wise_tracking_url FROM remittances WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length || !cur.rows[0].wise_transfer_id) return res.status(404).json({ error: 'Not found' });
+
+    // Cached?
+    if (cur.rows[0].wise_tracking_url) {
+      return res.json({ trackingUrl: cur.rows[0].wise_tracking_url, cached: true });
+    }
+
+    const payments = await wise.getPayments(cur.rows[0].wise_transfer_id);
+    // Wise's response shape varies — the tracking url tends to live on a
+    // payment-out item or a top-level field. Best-effort extraction.
+    const trackingUrl =
+      payments?.trackingUrl ||
+      payments?.statusUrl ||
+      payments?.payments?.find?.((p) => p.trackingUrl)?.trackingUrl ||
+      null;
+    if (trackingUrl) {
+      await pool.query('UPDATE remittances SET wise_tracking_url = $1, updated_at = NOW() WHERE id = $2', [trackingUrl, req.params.id]);
+    }
+    res.json({ trackingUrl, payments });
+  } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
-// ━━━ GET /transfer/:id/status ━━━
-router.get('/transfer/:id/status', requireConfigured, async (req, res) => {
+// ━━━ GET /transfer/:id/receipt — proxy Wise's receipt PDF ━━━
+router.get('/transfer/:id/receipt', requireConfigured, async (req, res) => {
   try {
-    const cur = await pool.query('SELECT wise_transfer_id FROM remittances WHERE id = $1', [req.params.id]);
+    const cur = await pool.query('SELECT wise_transfer_id, recipient_name FROM remittances WHERE id = $1', [req.params.id]);
     if (!cur.rows.length || !cur.rows[0].wise_transfer_id) return res.status(404).json({ error: 'Not found' });
-    const w = await wise.getTransfer(cur.rows[0].wise_transfer_id);
-    const completed = ['outgoing_payment_sent', 'funds_converted', 'paid'].includes(String(w.status).toLowerCase());
-    await pool.query(`
-      UPDATE remittances
-         SET wise_status = $1, status = $2,
-             completed_at = CASE WHEN $3::boolean THEN NOW() ELSE completed_at END,
-             updated_at = NOW()
-       WHERE id = $4
-    `, [w.status, completed ? 'completed' : 'processing', completed, req.params.id]);
-    res.json(w);
+    const wid = cur.rows[0].wise_transfer_id;
+    const name = (cur.rows[0].recipient_name || 'recipient').replace(/[^A-Za-z0-9]+/g, '_').slice(0, 40);
+    const pdf = await wise.getReceiptPdf(wid);
+    res.setHeader('Content-Type', pdf.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="FoundaPay-Remittance-${wid}-${name}.pdf"`);
+    res.send(pdf.buffer);
   } catch (err) {
+    console.error('[wise receipt]', err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
