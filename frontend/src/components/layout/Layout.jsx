@@ -239,9 +239,13 @@ export default function Layout({ children }) {
             </h1>
           </div>
 
-          {/* CENTER — global search (hidden on mobile) */}
-          <div className="hidden md:flex items-center justify-center" style={{ flex: 1 }}>
-            <GlobalSearch />
+          {/* CENTER — global search (hidden on mobile). Locked width so the
+              bar never reflows or shifts when the page title or right-side
+              actions change between routes. */}
+          <div className="hidden md:flex items-center justify-center" style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ width: 400, maxWidth: '100%' }}>
+              <GlobalSearch />
+            </div>
           </div>
 
           {/* RIGHT — actions */}
@@ -326,9 +330,10 @@ function GradientAvatar({ name = '' }) {
   const initials = (name || '')
     .split(/\s+/).filter(Boolean).slice(0, 2)
     .map((s) => s[0]).join('').toUpperCase() || 'FP';
+  // Intentionally no title= here — the email appears in the sidebar bottom
+  // already and we don't want a hover tooltip in the top header.
   return (
     <button
-      title={name}
       style={{
         width: 32,
         height: 32,

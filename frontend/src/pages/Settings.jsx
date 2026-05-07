@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Lock, Trash2, ShieldCheck, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Activity, Lock, Trash2, ShieldCheck, AlertTriangle, CheckCircle2, Plus, Edit2 } from 'lucide-react';
 import { api } from '../utils/api';
-import { Card, Button, Input, Select, Label, PageHeader, Alert, Badge } from '../components/ui';
+import { Card, Button, Input, Select, Label, PageHeader, Alert, Badge, Modal } from '../components/ui';
 import { toast } from '../store/toast';
 
 export default function Settings() {
@@ -88,8 +88,13 @@ export default function Settings() {
 // Tokens never leave the server: GET only returns "configured + metadata".
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function IntegrationsSection() {
+  // Renamed conceptually to "Remittance Channels" — Wise + bank/RIA rails
+  // live under one section, picked via sub-tabs. Wise is its own integration
+  // (encrypted API token); bank/RIA are operator-managed records used as
+  // "send from" options on the Remittance page.
   const [overview, setOverview] = useState(null);
   const [err, setErr] = useState(null);
+  const [subTab, setSubTab] = useState('wise'); // 'wise' | 'bank' | 'manual'
 
   async function load() {
     setErr(null);
@@ -103,19 +108,222 @@ function IntegrationsSection() {
   if (err) return <Alert tone="error" className="mb-4">{err}</Alert>;
   if (!overview) return <Card className="p-5" style={{ color: 'var(--text-secondary)' }}>Loading integrations…</Card>;
 
+  const SUBS = [
+    { id: 'wise',   label: 'Wise' },
+    { id: 'bank',   label: 'Bank / RIA' },
+    { id: 'manual', label: 'Manual Wire' },
+  ];
+
   return (
     <>
       <h2 style={{ fontSize: 14, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)', marginBottom: 12 }}>
-        Integrations · API credentials vault
+        Remittance Channels
       </h2>
-      {!overview.cryptoConfigured && (
+      {!overview.cryptoConfigured && subTab === 'wise' && (
         <Alert tone="warning" className="mb-3" icon={<AlertTriangle size={14} />}>
           <strong>APP_ENCRYPTION_KEY missing on server.</strong> Add it to <code>.env</code> (≥16 chars) and restart pm2.
           Until then, tokens cannot be saved or read from the encrypted vault.
         </Alert>
       )}
-      <WiseIntegrationCard status={overview.providers?.wise} disabled={!overview.cryptoConfigured} onChanged={load} />
+
+      {/* Sub-tabs */}
+      <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--border)', marginBottom: 14 }}>
+        {SUBS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setSubTab(t.id)}
+            style={{
+              padding: '8px 14px', fontSize: 13, fontWeight: 500,
+              color: subTab === t.id ? 'var(--accent)' : 'var(--text-secondary)',
+              background: 'transparent', border: 'none',
+              borderBottom: `2px solid ${subTab === t.id ? 'var(--accent)' : 'transparent'}`,
+              marginBottom: -1, cursor: 'pointer',
+            }}
+          >{t.label}</button>
+        ))}
+      </div>
+
+      {subTab === 'wise' && (
+        <WiseIntegrationCard status={overview.providers?.wise} disabled={!overview.cryptoConfigured} onChanged={load} />
+      )}
+      {subTab === 'bank'   && <BankRiaChannels />}
+      {subTab === 'manual' && <ManualWireTemplate />}
     </>
+  );
+}
+
+// ━━━ Bank / RIA channels — CRUD over /api/remittance-channels ━━
+function BankRiaChannels() {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState(null);
+  const [editing, setEditing] = useState(null); // null | row | 'new'
+
+  async function load() {
+    try {
+      const r = await api.get('/api/remittance-channels');
+      // Show every non-Wise channel here. (Wise lives in its own sub-tab.)
+      setRows((r.rows || []).filter((x) => x.channel_type !== 'wise_api'));
+    } catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { load(); }, []);
+
+  async function archive(row) {
+    if (!window.confirm(`Delete "${row.name}"?`)) return;
+    try {
+      await api.delete(`/api/remittance-channels/${row.id}`);
+      toast.success('Channel removed');
+      load();
+    } catch (e) { toast.error(e.message); }
+  }
+
+  if (err) return <Alert tone="error">{err}</Alert>;
+  if (!rows) return <Card className="p-5" style={{ color: 'var(--text-secondary)' }}>Loading…</Card>;
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Bank wires, RIA, MoneyGram, hawala</div>
+          <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+            Operator-managed sending rails. Each one shows up as a "From account" option in the Remittance flow.
+          </div>
+        </div>
+        <Button onClick={() => setEditing('new')}><Plus size={14} /> Add channel</Button>
+      </div>
+
+      {rows.length === 0 ? (
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
+          No bank/RIA channels yet. Add the first one to enable manual remittance flows.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 8 }}>
+          {rows.map((r) => (
+            <div key={r.id} style={{
+              border: '1px solid var(--border)', borderRadius: 10, padding: 12,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+              background: r.is_active ? 'var(--bg-primary)' : 'var(--bg-tertiary)',
+            }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                  <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{r.name}</span>
+                  <Badge tone={r.is_active ? 'success' : 'zinc'}>{r.is_active ? 'Active' : 'Inactive'}</Badge>
+                  <Badge tone="info">{r.channel_type}</Badge>
+                </div>
+                {r.account_reference && (
+                  <div style={{ fontSize: 12, color: 'var(--text-tertiary)', fontFamily: 'ui-monospace, monospace' }}>{r.account_reference}</div>
+                )}
+                {r.instructions && (
+                  <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.instructions}</div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                <Button variant="secondary" size="sm" onClick={() => setEditing(r)}><Edit2 size={12} /> Edit</Button>
+                <Button variant="ghost" size="sm" onClick={() => archive(r)}><Trash2 size={12} /></Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <ChannelModal
+          channel={editing === 'new' ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load(); }}
+        />
+      )}
+    </Card>
+  );
+}
+
+function ChannelModal({ channel, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    name:              channel?.name              || '',
+    channel_type:      channel?.channel_type      || 'wire',
+    account_reference: channel?.account_reference || '',
+    instructions:      channel?.instructions      || '',
+    is_active:         channel?.is_active !== false,
+  });
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      if (channel?.id) await api.put(`/api/remittance-channels/${channel.id}`, form);
+      else             await api.post('/api/remittance-channels', form);
+      toast.success(channel ? 'Channel updated' : 'Channel created');
+      onSaved();
+    } catch (e) { toast.error(e.message); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={channel ? `Edit ${channel.name}` : 'New remittance channel'}
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button onClick={save} disabled={saving || !form.name}>{saving ? 'Saving…' : 'Save'}</Button>
+      </>}
+    >
+      <div className="grid grid-cols-2 gap-3">
+        <div className="col-span-2">
+          <Label>Name *</Label>
+          <Input value={form.name} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Western Union" />
+        </div>
+        <div>
+          <Label>Type</Label>
+          <Select value={form.channel_type} onChange={(e) => setForm(f => ({ ...f, channel_type: e.target.value }))}>
+            <option value="wire">Wire</option>
+            <option value="ria">RIA</option>
+            <option value="moneygram">MoneyGram</option>
+            <option value="hawala">Hawala</option>
+            <option value="swift">SWIFT</option>
+            <option value="other">Other</option>
+          </Select>
+        </div>
+        <div>
+          <Label>Active</Label>
+          <Select value={form.is_active ? '1' : '0'} onChange={(e) => setForm(f => ({ ...f, is_active: e.target.value === '1' }))}>
+            <option value="1">Yes</option>
+            <option value="0">No</option>
+          </Select>
+        </div>
+        <div className="col-span-2">
+          <Label>Account / Reference</Label>
+          <Input value={form.account_reference} onChange={(e) => setForm(f => ({ ...f, account_reference: e.target.value }))} placeholder="Account 1234567890 · Routing 0000" />
+        </div>
+        <div className="col-span-2">
+          <Label>Instructions / Notes</Label>
+          <textarea
+            className="fp-input"
+            rows={3}
+            style={{ width: '100%', resize: 'vertical' }}
+            value={form.instructions}
+            onChange={(e) => setForm(f => ({ ...f, instructions: e.target.value }))}
+            placeholder="Bank: Chase  ·  SWIFT: CHASUS33  ·  Bene name: ..."
+          />
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ━━━ Manual wire template — single CMS-backed text blob for now ━━
+function ManualWireTemplate() {
+  return (
+    <Card className="p-5">
+      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+        Manual wire instructions template
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 12 }}>
+        Default wire instructions shown when an operator picks "Manual Wire" in the Remittance flow.
+        Edit the <code>manual_wire_template</code> entry below in the CMS list to update it; the value
+        is rendered verbatim on the new-transfer step.
+      </div>
+      <Alert tone="info">
+        Coming soon: in-place template editor. For now, scroll down to the CMS list and edit the
+        <code> manual_wire_template</code> key (creates one if missing).
+      </Alert>
+    </Card>
   );
 }
 

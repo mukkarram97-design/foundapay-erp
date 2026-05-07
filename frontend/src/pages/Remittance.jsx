@@ -284,6 +284,17 @@ function ChannelTab({ id, active, onClick, count, children }) {
 function TransferModal({ providers, onClose, onCreated }) {
   const [step, setStep] = useState(1);
   const [channel, setChannel] = useState(null); // 'wise' | 'manual'
+  // Multi-channel sender selection. When the operator picks a custom channel
+  // (bank wire / RIA / etc. configured in Settings → Remittance Channels)
+  // we route through the existing manual-wire flow but tag the transfer with
+  // the channel name so it shows up as "Sent via Western Union" downstream.
+  const [senderChannel, setSenderChannel] = useState(null); // remittance_channels row or null
+  const [customChannels, setCustomChannels] = useState([]);
+  useEffect(() => {
+    api.get('/api/remittance-channels?active=true')
+      .then((r) => setCustomChannels(r.rows || []))
+      .catch(() => {});
+  }, []);
 
   // Recipient state
   const [country, setCountry] = useState('PK');
@@ -479,6 +490,10 @@ function TransferModal({ providers, onClose, onCreated }) {
         const r = await api.post('/api/wise/transfer', body);
         setCreated({ channel: 'wise', remittance: r.remittance });
       } else if (channel === 'manual') {
+        // If a custom remittance_channels row was picked, prefix the notes
+        // with "[Sent via <name>]" so it lands in the audit trail without a
+        // backend schema change.
+        const channelTag = senderChannel ? `[Sent via ${senderChannel.name}] ` : '';
         const body = {
           recipientName: recipient.name,
           recipientBank: recipient.bankName,
@@ -492,7 +507,9 @@ function TransferModal({ providers, onClose, onCreated }) {
           providerFee: amount.fee ? parseFloat(amount.fee) : null,
           providerReference: reference,
           purpose,
-          reference: notes,
+          reference: channelTag + (notes || ''),
+          senderChannelId: senderChannel?.id || null,
+          senderChannelName: senderChannel?.name || null,
           payrollItemId: linkedPayrollItemId,
         };
         const r = await api.post('/api/wise/manual', body);
@@ -579,10 +596,10 @@ function TransferModal({ providers, onClose, onCreated }) {
       </>}>
       {err && <Alert tone="error" className="mb-3">{err}</Alert>}
 
-      {/* Step 1 — Channel */}
+      {/* Step 1 — Choose sending account */}
       {step === 1 && (
         <div>
-          <Label>Choose channel</Label>
+          <Label>From account</Label>
           <div className="grid grid-cols-2 gap-3">
             {['wise', 'manual', 'swift', 'ach'].map((id) => {
               const cfg = CHANNEL_LABEL[id];
@@ -591,12 +608,15 @@ function TransferModal({ providers, onClose, onCreated }) {
               const subtitle = id === 'wise' ? (provider?.configured ? 'Best rates · auto API transfer' : 'Configure in Settings → Integrations')
                 : id === 'manual' ? 'Records-only · upload proof later'
                 : 'Coming soon';
+              const selected = channel === id && !senderChannel;
               return (
-                <button key={id} type="button" onClick={() => !disabled && setChannel(id)} disabled={disabled}
+                <button key={id} type="button"
+                  onClick={() => { if (!disabled) { setChannel(id); setSenderChannel(null); } }}
+                  disabled={disabled}
                   style={{
                     padding: 16, borderRadius: 12, textAlign: 'left',
-                    border: `2px solid ${channel === id ? 'var(--accent)' : 'var(--border)'}`,
-                    background: channel === id ? 'var(--accent-dim)' : 'var(--bg-secondary)',
+                    border: `2px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                    background: selected ? 'var(--accent-dim)' : 'var(--bg-secondary)',
                     cursor: disabled ? 'not-allowed' : 'pointer',
                     opacity: disabled ? 0.55 : 1,
                   }}>
@@ -606,6 +626,31 @@ function TransferModal({ providers, onClose, onCreated }) {
                 </button>
               );
             })}
+
+            {/* Custom remittance_channels — bank wires, RIA, hawala, etc. */}
+            {customChannels.map((rc) => {
+              const selected = senderChannel?.id === rc.id;
+              return (
+                <button key={rc.id} type="button"
+                  onClick={() => { setChannel('manual'); setSenderChannel(rc); }}
+                  style={{
+                    padding: 16, borderRadius: 12, textAlign: 'left',
+                    border: `2px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                    background: selected ? 'var(--accent-dim)' : 'var(--bg-secondary)',
+                    cursor: 'pointer',
+                  }}>
+                  <div style={{ fontSize: 24, marginBottom: 6 }}>🏦</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{rc.name}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                    {rc.channel_type} {rc.account_reference ? `· ${rc.account_reference}` : ''}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-tertiary)' }}>
+            Need another account?{' '}
+            <a href="/settings" style={{ color: 'var(--accent)', textDecoration: 'none' }}>Add it in Settings → Remittance Channels →</a>
           </div>
         </div>
       )}

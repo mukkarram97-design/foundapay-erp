@@ -8,11 +8,33 @@
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 const { pool } = require('../db');
 const { authRequired } = require('../middleware/auth');
 
 const router = express.Router({ mergeParams: true });
 router.use(authRequired);
+
+// ── Brand logo upload (mirrors the per-client logo flow) ─────
+const LOGO_DIR = '/var/www/foundapay/uploads/brand-logos';
+try { fs.mkdirSync(LOGO_DIR, { recursive: true }); } catch { /* perms / exists */ }
+const brandLogoUpload = multer({
+  storage: multer.diskStorage({
+    destination: LOGO_DIR,
+    filename: (req, file, cb) => {
+      const ext = (path.extname(file.originalname).toLowerCase() || '.png').slice(0, 6);
+      cb(null, `brand-${req.params.id}${ext}`);
+    },
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/svg+xml'];
+    if (!allowed.includes(file.mimetype)) return cb(new Error('PNG/JPG/WebP/SVG only'));
+    cb(null, true);
+  },
+});
 
 const STAFF = new Set(['super_admin', 'owner', 'admin', 'finance_manager']);
 const isStaff = (req) => STAFF.has(req.user?.role);
@@ -131,6 +153,35 @@ router.put('/:id', async (req, res) => {
     res.status(500).json({ error: e.message });
   } finally {
     c.release();
+  }
+});
+
+// POST /api/clients/:client_id/brands/:id/logo — multipart 'logo'
+router.post('/:id/logo', (req, res, next) => {
+  if (!isStaff(req)) return res.status(403).json({ error: 'forbidden' });
+  next();
+}, brandLogoUpload.single('logo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (req.file.mimetype === 'image/svg+xml') {
+      const content = fs.readFileSync(req.file.path, 'utf8');
+      if (/<\s*script/i.test(content) || /\bon\w+\s*=/i.test(content) || /javascript:/i.test(content)) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(400).json({ error: 'SVG contains scripts — rejected for security' });
+      }
+    }
+    const filename = path.basename(req.file.path);
+    const logoUrl = `/uploads/brand-logos/${filename}`;
+    const r = await pool.query(
+      `UPDATE client_brands SET logo_url = $1, updated_at = NOW()
+        WHERE id = $2 AND client_id = $3
+        RETURNING id, logo_url`,
+      [logoUrl, req.params.id, req.params.client_id]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'not found' });
+    res.json({ success: true, logo_url: logoUrl });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

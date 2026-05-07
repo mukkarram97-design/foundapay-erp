@@ -104,6 +104,7 @@ export default function Clients() {
 }
 
 function ClientForm({ client, onClose, onSaved }) {
+  const [tab, setTab] = useState('details'); // 'details' | 'brands'
   const [form, setForm] = useState(client || { name: '', card_pct: 0, wire_pct: 0, ach_pct: 0, zelle_pct: 0, cheque_pct: 0, opening_balance: 0, status: 'active' });
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -131,26 +132,314 @@ function ClientForm({ client, onClose, onSaved }) {
 
   return (
     <Modal open onClose={onClose} title={client ? `Edit ${client.name}` : 'New client'} wide
-      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button></>}
+      footer={tab === 'details'
+        ? (<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button></>)
+        : (<Button onClick={onClose}>Done</Button>)}
     >
       {err && <Alert tone="error" className="mb-3">{err}</Alert>}
+
+      {/* Tab strip — only when we have a real client (id exists) */}
       {client?.id && (
-        <div className="mb-4">
-          <BrandingSection client={client} onChanged={(newUrl) => { client.logo_url = newUrl; setForm(f => ({ ...f })); }} />
+        <div style={{
+          display: 'flex', gap: 4, marginBottom: 14,
+          borderBottom: '1px solid var(--border)', paddingBottom: 0,
+        }}>
+          {[
+            { id: 'details', label: 'Details' },
+            { id: 'brands',  label: 'Brands' },
+          ].map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                padding: '8px 14px', borderRadius: '8px 8px 0 0', border: 'none',
+                background: tab === t.id ? 'var(--bg-hover)' : 'transparent',
+                color: tab === t.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+                fontSize: 13, fontWeight: 500, cursor: 'pointer',
+                borderBottom: tab === t.id ? '2px solid var(--accent)' : '2px solid transparent',
+                marginBottom: -1,
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
       )}
-      <div className="grid grid-cols-2 gap-3">
-        <div><Label>Name</Label><Input value={form.name || ''} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} required /></div>
-        <div><Label>Status</Label><Select value={form.status} onChange={(e) => setForm(f => ({ ...f, status: e.target.value }))}><option>active</option><option>inactive</option><option>on_hold</option><option>risk</option></Select></div>
-        <div><Label>Card %</Label><Input type="number" step="0.001" value={form.card_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, card_pct: e.target.value }))} /></div>
-        <div><Label>Wire %</Label><Input type="number" step="0.001" value={form.wire_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, wire_pct: e.target.value }))} /></div>
-        <div><Label>ACH %</Label><Input type="number" step="0.001" value={form.ach_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, ach_pct: e.target.value }))} /></div>
-        <div><Label>Zelle %</Label><Input type="number" step="0.001" value={form.zelle_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, zelle_pct: e.target.value }))} /></div>
-        <div><Label>Cheque %</Label><Input type="number" step="0.001" value={form.cheque_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, cheque_pct: e.target.value }))} /></div>
-        <div><Label>Opening balance</Label><Input type="number" step="0.01" value={form.opening_balance ?? ''} onChange={(e) => setForm(f => ({ ...f, opening_balance: e.target.value }))} /></div>
-        <div className="col-span-2"><Label>Other terms</Label><Input value={form.other_terms || ''} onChange={(e) => setForm(f => ({ ...f, other_terms: e.target.value }))} /></div>
-      </div>
+
+      {tab === 'details' && (
+        <>
+          {client?.id && (
+            <div className="mb-4">
+              <BrandingSection client={client} onChanged={(newUrl) => { client.logo_url = newUrl; setForm(f => ({ ...f })); }} />
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <div><Label>Name</Label><Input value={form.name || ''} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} required /></div>
+            <div><Label>Status</Label><Select value={form.status} onChange={(e) => setForm(f => ({ ...f, status: e.target.value }))}><option>active</option><option>inactive</option><option>on_hold</option><option>risk</option></Select></div>
+            <div><Label>Card %</Label><Input type="number" step="0.001" value={form.card_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, card_pct: e.target.value }))} /></div>
+            <div><Label>Wire %</Label><Input type="number" step="0.001" value={form.wire_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, wire_pct: e.target.value }))} /></div>
+            <div><Label>ACH %</Label><Input type="number" step="0.001" value={form.ach_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, ach_pct: e.target.value }))} /></div>
+            <div><Label>Zelle %</Label><Input type="number" step="0.001" value={form.zelle_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, zelle_pct: e.target.value }))} /></div>
+            <div><Label>Cheque %</Label><Input type="number" step="0.001" value={form.cheque_pct ?? ''} onChange={(e) => setForm(f => ({ ...f, cheque_pct: e.target.value }))} /></div>
+            <div><Label>Opening balance</Label><Input type="number" step="0.01" value={form.opening_balance ?? ''} onChange={(e) => setForm(f => ({ ...f, opening_balance: e.target.value }))} /></div>
+            <div className="col-span-2"><Label>Other terms</Label><Input value={form.other_terms || ''} onChange={(e) => setForm(f => ({ ...f, other_terms: e.target.value }))} /></div>
+          </div>
+        </>
+      )}
+
+      {tab === 'brands' && client?.id && <BrandsTab client={client} />}
     </Modal>
+  );
+}
+
+// ━━━ Brands tab — list + add/edit/archive + logo upload ──────
+function BrandsTab({ client }) {
+  const [brands, setBrands] = useState(null);
+  const [editing, setEditing] = useState(null); // null | brand object | 'new'
+
+  async function load() {
+    try {
+      const r = await api.get(`/api/clients/${client.id}/brands`);
+      setBrands(r.rows || []);
+    } catch (e) { toast.error(e.message); }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  async function setDefault(b) {
+    try {
+      await api.put(`/api/clients/${client.id}/brands/${b.id}`, { is_default: true });
+      toast.success(`${b.name} is now the default`);
+      load();
+    } catch (e) { toast.error(e.message); }
+  }
+
+  async function archive(b) {
+    if (!window.confirm(`Archive brand "${b.name}"?`)) return;
+    try {
+      await api.delete(`/api/clients/${client.id}/brands/${b.id}`);
+      toast.success('Brand archived');
+      load();
+    } catch (e) { toast.error(e.message); }
+  }
+
+  if (!brands) return <div style={{ color: 'var(--text-tertiary)' }}>Loading brands…</div>;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+          Brands appear on payment pages + invoice receipts. Each brand has its own statement descriptor and customer-facing note.
+        </div>
+        <Button onClick={() => setEditing('new')}>+ Add Brand</Button>
+      </div>
+
+      {brands.length === 0 ? (
+        <Card className="p-8 text-center" style={{ color: 'var(--text-tertiary)' }}>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>No brands yet for this client</div>
+          <Button variant="secondary" onClick={() => setEditing('new')}>+ Add the first brand</Button>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {brands.map((b) => <BrandCard key={b.id} brand={b} onEdit={() => setEditing(b)} onSetDefault={() => setDefault(b)} onArchive={() => archive(b)} />)}
+        </div>
+      )}
+
+      {editing && (
+        <BrandModal
+          client={client}
+          brand={editing === 'new' ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function BrandCard({ brand, onEdit, onSetDefault, onArchive }) {
+  return (
+    <Card className="p-4" style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', gap: 12 }}>
+        <div style={{
+          width: 60, height: 60, flexShrink: 0,
+          borderRadius: 10, border: '1px solid var(--border)',
+          background: brand.brand_color || 'var(--bg-tertiary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          overflow: 'hidden', color: 'white', fontWeight: 700, fontSize: 18,
+        }}>
+          {brand.logo_url
+            ? <img src={brand.logo_url} alt={brand.name} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+            : (brand.name || '?').slice(0, 2).toUpperCase()}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+            <div style={{ fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{brand.name}</div>
+            {brand.is_default && <span style={{ fontSize: 10, color: 'var(--accent)', background: 'var(--accent-dim)', padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>⭐ DEFAULT</span>}
+          </div>
+          {brand.statement_descriptor && (
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+              Descriptor:{' '}
+              <code style={{ fontFamily: 'ui-monospace, monospace', background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: 4 }}>
+                {brand.statement_descriptor}
+              </code>
+            </div>
+          )}
+          {brand.support_email && (
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{brand.support_email}</div>
+          )}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 12, flexWrap: 'wrap' }}>
+        <Button variant="secondary" size="sm" onClick={onEdit}>Edit</Button>
+        {!brand.is_default && <Button variant="ghost" size="sm" onClick={onSetDefault}>Set default</Button>}
+        <Button variant="ghost" size="sm" onClick={onArchive}>Archive</Button>
+      </div>
+    </Card>
+  );
+}
+
+function BrandModal({ client, brand, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    name: brand?.name || '',
+    statement_descriptor: brand?.statement_descriptor || '',
+    descriptor_note: brand?.descriptor_note || '',
+    logo_url: brand?.logo_url || '',
+    brand_color: brand?.brand_color || '#7c3aed',
+    support_email: brand?.support_email || '',
+    support_phone: brand?.support_phone || '',
+    is_default: brand?.is_default || false,
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  const fileRef = useRef(null);
+
+  async function save() {
+    setSaving(true); setErr(null);
+    try {
+      let saved;
+      if (brand?.id) {
+        saved = await api.put(`/api/clients/${client.id}/brands/${brand.id}`, form);
+      } else {
+        saved = await api.post(`/api/clients/${client.id}/brands`, form);
+      }
+      // Upload logo if a file is staged (only after save so we have an id)
+      if (fileRef.current?.files?.[0]) {
+        const fd = new FormData();
+        fd.append('logo', fileRef.current.files[0]);
+        const token = localStorage.getItem('foundapay_token');
+        const r = await fetch(`/api/clients/${client.id}/brands/${saved.id}/logo`, {
+          method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
+        });
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          throw new Error(e.error || 'Logo upload failed');
+        }
+      }
+      toast.success(brand?.id ? 'Brand updated' : 'Brand created');
+      onSaved();
+    } catch (e) { setErr(e.message); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={brand ? `Edit ${brand.name}` : 'New brand'} wide
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button onClick={save} disabled={saving || !form.name}>{saving ? 'Saving…' : 'Save brand'}</Button>
+      </>}
+    >
+      {err && <Alert tone="error" className="mb-3">{err}</Alert>}
+
+      <SectionHeader>Identity</SectionHeader>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Brand name *</Label>
+          <Input maxLength={120} value={form.name} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Broadway Publishers" />
+        </div>
+        <div>
+          <Label>Brand color</Label>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input type="color" value={form.brand_color || '#7c3aed'} onChange={(e) => setForm(f => ({ ...f, brand_color: e.target.value }))} style={{ width: 36, height: 36, border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', background: 'transparent' }} />
+            <Input value={form.brand_color} onChange={(e) => setForm(f => ({ ...f, brand_color: e.target.value }))} placeholder="#7c3aed" style={{ fontFamily: 'ui-monospace, monospace' }} />
+          </div>
+        </div>
+      </div>
+
+      <SectionHeader>Logo</SectionHeader>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <div style={{
+          width: 60, height: 60, border: '1px dashed var(--border)',
+          borderRadius: 10, background: form.brand_color || 'var(--bg-tertiary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          overflow: 'hidden',
+        }}>
+          {form.logo_url
+            ? <img src={form.logo_url} alt="logo" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+            : <span style={{ fontSize: 18, fontWeight: 700, color: 'white' }}>{(form.name || '?').slice(0, 2).toUpperCase()}</span>}
+        </div>
+        <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" />
+        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>PNG/JPG/WebP/SVG, max 2 MB</span>
+      </div>
+
+      <SectionHeader>Contact</SectionHeader>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Support email</Label>
+          <Input value={form.support_email} onChange={(e) => setForm(f => ({ ...f, support_email: e.target.value }))} placeholder="support@example.com" />
+        </div>
+        <div>
+          <Label>Support phone</Label>
+          <Input value={form.support_phone} onChange={(e) => setForm(f => ({ ...f, support_phone: e.target.value }))} placeholder="+1 555 …" />
+        </div>
+      </div>
+
+      <SectionHeader>
+        Payment descriptor
+        <span style={{ fontSize: 10, color: 'var(--warning)', marginLeft: 6, fontWeight: 500 }}>⚠ Appears on customer bank statements</span>
+      </SectionHeader>
+      <div>
+        <Label>Statement descriptor (max 22 chars) — {form.statement_descriptor.length}/22</Label>
+        <Input
+          value={form.statement_descriptor}
+          maxLength={22}
+          onChange={(e) => setForm(f => ({ ...f, statement_descriptor: e.target.value.toUpperCase() }))}
+          placeholder="BROADWAY PUB"
+          style={{ fontFamily: 'ui-monospace, monospace' }}
+        />
+        {form.statement_descriptor && (
+          <div style={{ marginTop: 6, padding: '8px 10px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, fontFamily: 'ui-monospace, monospace', display: 'flex', justifyContent: 'space-between' }}>
+            <span>{form.statement_descriptor}</span>
+            <span style={{ color: 'var(--danger)' }}>-$100.00</span>
+          </div>
+        )}
+      </div>
+      <div className="mt-3">
+        <Label>Customer note (shown on payment page)</Label>
+        <textarea
+          className="fp-input"
+          rows={3}
+          style={{ width: '100%', resize: 'vertical' }}
+          value={form.descriptor_note}
+          onChange={(e) => setForm(f => ({ ...f, descriptor_note: e.target.value }))}
+          placeholder="Charge appears as BROADWAY*PUB on your statement. Questions? support@example.com"
+        />
+      </div>
+
+      <SectionHeader>Settings</SectionHeader>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+        <input type="checkbox" checked={form.is_default} onChange={(e) => setForm(f => ({ ...f, is_default: e.target.checked }))} />
+        Set as default brand for this client
+      </label>
+    </Modal>
+  );
+}
+
+function SectionHeader({ children }) {
+  return (
+    <div style={{
+      fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
+      color: 'var(--text-tertiary)', fontWeight: 600, marginTop: 16, marginBottom: 6,
+    }}>{children}</div>
   );
 }
 

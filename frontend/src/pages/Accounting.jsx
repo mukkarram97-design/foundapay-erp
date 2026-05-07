@@ -227,9 +227,9 @@ function InhouseCalcsTab() {
   }
   useEffect(() => { load(); }, []);
 
-  if (err) return <Alert tone="error">{err}</Alert>;
-  if (!pnl) return <Card className="p-8" style={{ color: 'var(--text-secondary)' }}>Loading…</Card>;
-
+  // ⚠ HOOKS MUST RUN BEFORE ANY EARLY RETURN — moving useMemo above the
+  // `if (!pnl) return …` guard fixes the "Rendered more hooks than during
+  // the previous render" crash that blanked /accounting on first paint.
   const expensesByCategory = useMemo(() => {
     const m = {};
     for (const e of expenses) {
@@ -239,12 +239,18 @@ function InhouseCalcsTab() {
     return Object.entries(m).sort((a, b) => b[1] - a[1]);
   }, [expenses]);
 
+  if (err) return <Alert tone="error">{err}</Alert>;
+  if (!pnl) return <Card className="p-8" style={{ color: 'var(--text-secondary)' }}>Loading…</Card>;
+
   const totalExpenses = expensesByCategory.reduce((s, [, v]) => s + v, 0);
-  const revenue = parseFloat(pnl.totals.commission_revenue) || 0;
+  // Defensive: /api/reports/pnl might return totals as null/undefined under
+  // edge cases — null-safe access prevents a TypeError that would also blank
+  // the page after the hook-order fix above.
+  const revenue = parseFloat(pnl?.totals?.commission_revenue) || 0;
   const grossProfit = revenue;
   const netProfit = grossProfit - totalExpenses;
 
-  const fxRate = cms.fx_rate_pkr || 280;
+  const fxRate = cms?.fx_rate_pkr || 280;
 
   return (
     <div className="space-y-4">
