@@ -82,7 +82,15 @@ function rowToResult(row, role) {
 //                      [] (empty list) — frontend should warn.
 router.get('/', async (req, res) => {
   try {
-    const onlyActive = req.query.active === 'true';
+    // ?active=true was originally a hard filter to is_live merchants. Staff
+    // (super_admin/owner/admin/finance_manager) need to see EVERY merchant in
+    // the VT picker — including sandbox + not-yet-live rows — so the flag
+    // is now treated as a soft hint and ignored for staff. Client_user
+    // requests still respect it: they should never be charging through an
+    // is_live=false processor.
+    const role = req.user?.role;
+    const isStaff = ['super_admin', 'owner', 'admin', 'finance_manager'].includes(role);
+    const onlyActive = req.query.active === 'true' && !isStaff;
     const clientId = req.query.client_id || null;
     const where = ['m.is_deleted = false'];
     const params = [];
@@ -96,12 +104,15 @@ router.get('/', async (req, res) => {
       ? 'INNER JOIN client_merchants cm ON cm.merchant_id = m.id'
       : 'LEFT JOIN client_merchants cm ON cm.merchant_id = m.id AND cm.client_id = NULL'; // never matches → all NULLs
 
+    // Order: live first (so VT default lands on a live row), then by entity
+    // name for grouped-dropdown rendering, then merchant name within each group.
     const orderBy = clientId
-      ? 'cm.is_default DESC, m.processor_name'
-      : 'm.processor_name, e.legal_name';
+      ? 'cm.is_default DESC, m.is_live DESC, m.processor_name'
+      : 'm.is_live DESC, e.legal_name NULLS LAST, m.processor_name';
 
     const r = await pool.query(`
-      SELECT m.*, e.legal_name AS entity_name, b.bank_name,
+      SELECT m.*, e.legal_name AS entity_name, e.owner_name AS entity_owner_name,
+             b.bank_name,
              cm.is_default              AS cm_is_default,
              cm.can_direct_charge       AS cm_can_direct_charge,
              cm.can_generate_links      AS cm_can_generate_links,

@@ -122,18 +122,22 @@ export default function ProcessPayment() {
       api.get('/api/clients'),
       api.get('/api/entities'),
       api.get('/api/vt/public-config'),
-      api.get('/api/merchants?active=true').catch(() => ({ rows: [] })),
+      // Backend now ignores ?active=true for staff — staff always gets every
+      // non-deleted merchant (live + sandbox + not-yet-live). The frontend no
+      // longer filters by is_live client-side; the grouped dropdown surfaces
+      // status (🟢 live / ⬛ sandbox / ⚪ inactive) inside each option.
+      api.get('/api/merchants').catch(() => ({ rows: [] })),
     ]).then(([cl, en, cfg, mr]) => {
       setClients(cl.rows);
       setEntities(en.rows);
       setAuthConfig(cfg);
-      const liveMerchants = (mr.rows || []).filter((m) => m.is_live);
-      setMerchants(liveMerchants);
-      // Pick the first live merchant by default. If only one, use it.
-      if (liveMerchants[0]) {
-        setMerchantId(liveMerchants[0].id);
-        // Auto-fill entity from merchant if it has one
-        const ent = liveMerchants[0].entity_id && en.rows.find((e) => e.id === liveMerchants[0].entity_id);
+      const allMerchants = mr.rows || [];
+      setMerchants(allMerchants);
+      // Default selection priority: first is_live → else first overall.
+      const def = allMerchants.find((m) => m.is_live) || allMerchants[0];
+      if (def) {
+        setMerchantId(def.id);
+        const ent = def.entity_id && en.rows.find((e) => e.id === def.entity_id);
         if (ent) {
           setForm((f) => ({ ...f, entity_id: ent.id, brand_name: cfg.entity || ent.legal_name }));
         } else {
@@ -168,24 +172,27 @@ export default function ProcessPayment() {
   }, [merchantId]);
 
   // When CLIENT changes, refetch merchants filtered to that client's
-  // assigned merchants (via client_merchants junction). For super_admin
-  // viewing without a client selected, fall back to active merchants.
+  // assigned merchants (via client_merchants junction). When no client is
+  // selected, super_admin sees every non-deleted merchant (sandbox + live)
+  // grouped by entity in the dropdown.
   useEffect(() => {
     const clientId = form.client_id;
     const url = clientId
-      ? `/api/merchants?active=true&client_id=${clientId}`
-      : '/api/merchants?active=true';
+      ? `/api/merchants?client_id=${clientId}`
+      : '/api/merchants';
     api.get(url)
       .then((mr) => {
-        const liveMerchants = (mr.rows || []).filter((m) => m.is_live);
-        setMerchants(liveMerchants);
-        // Auto-select default if exactly one or a flagged default exists.
-        const def = liveMerchants.find((m) => m.cm_is_default) || liveMerchants[0];
-        if (def && (!merchantId || !liveMerchants.some((m) => m.id === merchantId))) {
+        const all = mr.rows || [];
+        setMerchants(all);
+        // Auto-select: cm_is_default if a client is selected, else first
+        // is_live merchant, else first overall.
+        const def = clientId
+          ? (all.find((m) => m.cm_is_default) || all.find((m) => m.is_live) || all[0])
+          : (all.find((m) => m.is_live) || all[0]);
+        if (def && (!merchantId || !all.some((m) => m.id === merchantId))) {
           setMerchantId(def.id);
         }
-        // If client has zero merchants assigned, clear selection.
-        if (clientId && liveMerchants.length === 0) {
+        if (clientId && all.length === 0) {
           setMerchantId('');
         }
       })
@@ -579,19 +586,42 @@ export default function ProcessPayment() {
             />
           </div>
 
-          {/* Merchant selector — sits between charge-type buttons and the live banner */}
+          {/* Merchant selector — grouped by entity. Each option carries a
+              health emoji + LIVE/SANDBOX/INACTIVE tag so the operator can
+              tell at a glance which account they're charging through. */}
           {merchants.length > 0 && (
             <div style={{ marginTop: 14 }}>
               <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: 6 }}>
-                Merchant account {form.client_id && <span style={{ fontWeight: 400, textTransform: 'none', color: 'var(--text-tertiary)', letterSpacing: 0 }}>(filtered to selected client)</span>}
+                Merchant account
+                {form.client_id && <span style={{ fontWeight: 400, textTransform: 'none', color: 'var(--text-tertiary)', letterSpacing: 0 }}> (filtered to selected client)</span>}
+                {!form.client_id && <span style={{ fontWeight: 400, textTransform: 'none', color: 'var(--text-tertiary)', letterSpacing: 0 }}> · {merchants.length} available</span>}
               </div>
               <Select value={merchantId} onChange={(e) => setMerchantId(e.target.value)}>
-                {merchants.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.processor_name} — {procLabel(m.processor_type)} {healthDot(m.health_status)}
-                    {m.cm_is_default ? ' · default' : ''}
-                  </option>
-                ))}
+                {(() => {
+                  // Group merchants by entity_name for the <optgroup>s. Rows
+                  // with no entity collect under "No entity assigned" so they
+                  // remain visible. Order inside each group is live-first
+                  // (matches the backend's ORDER BY).
+                  const groups = new Map();
+                  for (const m of merchants) {
+                    const key = m.entity_name || 'No entity assigned';
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(m);
+                  }
+                  return Array.from(groups.entries()).map(([entityName, list]) => (
+                    <optgroup key={entityName} label={`── ${entityName.toUpperCase()} ──`}>
+                      {list.map((m) => {
+                        const tag = m.is_sandbox ? 'SANDBOX' : (m.is_live ? 'LIVE' : 'INACTIVE');
+                        return (
+                          <option key={m.id} value={m.id}>
+                            {healthDot(m.health_status)} {m.processor_name} — {procLabel(m.processor_type)} ({tag})
+                            {m.cm_is_default ? ' · default' : ''}
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                  ));
+                })()}
               </Select>
               {selectedMerchant?.health_status === 'error' && (
                 <div style={{ marginTop: 6, fontSize: 11, color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: 6 }}>
