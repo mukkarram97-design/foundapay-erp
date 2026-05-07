@@ -145,17 +145,17 @@ export function Modal({ open, onClose, title, children, footer, wide = false }) 
 
 // ━━━ Tables ─────────────────────────────────────────────────
 
-export const Table = ({ children, className = '' }) => (
+export const Table = ({ children, className = '', ...rest }) => (
   <div className={`overflow-x-auto ${className}`}>
-    <table className="fp-table">{children}</table>
+    <table className="fp-table" {...rest}>{children}</table>
   </div>
 );
-export const Thead = ({ children }) => <thead>{children}</thead>;
-export const Th    = ({ children, className = '' }) => <th className={className}>{children}</th>;
+export const Thead = ({ children, ...rest }) => <thead {...rest}>{children}</thead>;
+export const Th    = ({ children, className = '', ...rest }) => <th className={className} {...rest}>{children}</th>;
 export const Tr    = ({ children, className = '', clickable, ...rest }) => (
   <tr className={`${clickable ? 'clickable' : ''} ${className}`} {...rest}>{children}</tr>
 );
-export const Td    = ({ children, className = '' }) => <td className={className}>{children}</td>;
+export const Td    = ({ children, className = '', ...rest }) => <td className={className} {...rest}>{children}</td>;
 
 // ━━━ Format helpers ─────────────────────────────────────────
 

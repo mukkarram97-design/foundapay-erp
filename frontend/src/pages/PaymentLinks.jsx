@@ -1,35 +1,46 @@
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Unified "Payment Requests" page — covers both simple links AND invoices.
+// Payment Requests — unified page for simple links + invoices.
 // Source of truth: payment_link_requests; invoices joined by invoice_number.
 // row.type = 'invoice' when joined; 'link' otherwise.
+//
+// UX principles enforced here:
+//   - Row click opens a RIGHT-side slide-over (400px). Table never
+//     reflows. Click X / outside / Esc to close. Click another row
+//     to swap the slide-over content.
+//   - Selected row gets a 3px left-border accent (purple).
+//   - Filters live in a 2-row bar: status tabs (row 1) + search +
+//     dropdowns (row 2). Filter state syncs to URL so screens are
+//     shareable.
+//   - Mobile (< 768px): table collapses to a card list and the
+//     slide-over fills the viewport.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   MoreVertical, Copy, ExternalLink, QrCode, Mail, Eye, Edit2, XCircle, Plus, Search, X,
-  Link as LinkIcon, FileSpreadsheet, ChevronDown, ChevronRight, Trash2,
+  Link as LinkIcon, FileSpreadsheet, ChevronDown, Trash2, Download,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../utils/api';
 import {
   Card, Button, Input, Select, Label, PageHeader, Modal, Alert, Badge,
   Table, Thead, Th, Tr, Td, money, dateOnly,
 } from '../components/ui';
+import SlideOver from '../components/ui/SlideOver';
 import { toast } from '../store/toast';
 import { useAuth } from '../store/auth';
 
 const TABS = [
-  { id: 'all',         label: 'All' },
-  { id: 'pending',     label: 'Pending' },
-  { id: 'paid',        label: 'Paid' },
-  { id: 'expired',     label: 'Expired' },
-  { id: 'cancelled',   label: 'Cancelled' },
-  { id: 'invoices',    label: 'Invoices' },
+  { id: 'all',          label: 'All' },
+  { id: 'pending',      label: 'Pending' },
+  { id: 'paid',         label: 'Paid' },
+  { id: 'expired',      label: 'Expired' },
+  { id: 'cancelled',    label: 'Cancelled' },
+  { id: 'invoices',     label: 'Invoices' },
   { id: 'simple_links', label: 'Simple Links' },
 ];
 
-// status → display label + tone. link_generated/requested → "Pending"
 const STATUS_DISPLAY = {
   paid:              { label: 'Paid ✓', tone: 'success' },
   cancelled:         { label: 'Cancelled', tone: 'danger' },
@@ -60,39 +71,16 @@ function relativeTime(iso) {
   return d.toLocaleDateString();
 }
 
-// Activity column summary — color-coded by latest engagement
 function activitySummary(row) {
   const log = row.access_log || {};
   const status = row.status;
   const opened = log.view_count > 0 || !!log.first_opened_at;
-  const copied = log.copy_count > 0;
-  if (status === 'paid') {
-    return {
-      tone: 'success',
-      lines: [
-        opened ? `Opened ${log.view_count || 1}×` : 'Paid',
-        log.first_opened_at && row.paid_at
-          ? `Paid ${relativeTime(row.paid_at)}`
-          : `Paid ${relativeTime(row.paid_at || row.created_at)}`,
-      ],
-    };
-  }
-  if (opened) {
-    return {
-      tone: 'warning',
-      lines: [
-        `${copied ? 'Sent • ' : ''}Opened ${log.view_count || 1}×`,
-        `Last: ${relativeTime(log.viewed_at || log.first_opened_at)}`,
-      ],
-    };
-  }
-  if (copied) {
-    return { tone: 'neutral', lines: [`Copied ${log.copy_count}×`, `Not opened yet`] };
-  }
-  return { tone: 'muted', lines: ['Not opened yet'] };
+  if (status === 'paid') return { tone: 'success', text: 'Paid ✓' };
+  if (opened) return { tone: 'warning', text: `Opened ${log.view_count || 1}×` };
+  if (log.copy_count > 0) return { tone: 'neutral', text: `Copied ${log.copy_count}×` };
+  return { tone: 'muted', text: 'Not opened' };
 }
 
-// Copy + log helper. Errors are silent — copy is the user-visible action.
 function copyAndLog(row) {
   const url = row.url || `https://portal.foundapay.com/pay/${row.token}`;
   navigator.clipboard.writeText(url);
@@ -109,20 +97,40 @@ export default function PaymentLinks() {
   const canEdit   = ['super_admin', 'owner', 'admin', 'finance_manager'].includes(me?.role);
   const canDelete = ['super_admin', 'owner'].includes(me?.role);
 
-  const [tab, setTab] = useState('all');
-  const [q, setQ] = useState('');
-  const [clientFilter, setClientFilter] = useState('');
-  const [createdByFilter, setCreatedByFilter] = useState('');
-  const [typeFilter, setTypeFilter] = useState(''); // '' | 'invoice' | 'link'
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [page, setPage] = useState(1);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Filter state (initialized from URL — makes deep links shareable)
+  const [tab, setTab] = useState(searchParams.get('tab') || 'all');
+  const [q, setQ] = useState(searchParams.get('q') || '');
+  const [clientFilter, setClientFilter] = useState(searchParams.get('client') || '');
+  const [createdByFilter, setCreatedByFilter] = useState(searchParams.get('creator') || '');
+  const [typeFilter, setTypeFilter] = useState(searchParams.get('type') || '');
+  const [dateFrom, setDateFrom] = useState(searchParams.get('from') || '');
+  const [dateTo, setDateTo] = useState(searchParams.get('to') || '');
+  const [page, setPage] = useState(parseInt(searchParams.get('page') || '1', 10));
+
+  // Push filter state into URL whenever it changes
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (tab && tab !== 'all') next.set('tab', tab);
+    if (q) next.set('q', q);
+    if (clientFilter) next.set('client', clientFilter);
+    if (createdByFilter) next.set('creator', createdByFilter);
+    if (typeFilter) next.set('type', typeFilter);
+    if (dateFrom) next.set('from', dateFrom);
+    if (dateTo) next.set('to', dateTo);
+    if (page > 1) next.set('page', String(page));
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, q, clientFilter, createdByFilter, typeFilter, dateFrom, dateTo, page]);
+
   const [data, setData] = useState({ results: [], total: 0, summary: {} });
   const [clients, setClients] = useState([]);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
-  const [expanded, setExpanded] = useState(null);   // currently-expanded row id
+
+  const [selected, setSelected] = useState(null);     // currently-open slide-over row
   const [qrModal, setQrModal] = useState(null);
   const [cancelModal, setCancelModal] = useState(null);
   const [newMenuOpen, setNewMenuOpen] = useState(false);
@@ -130,8 +138,6 @@ export default function PaymentLinks() {
   async function load() {
     setLoading(true); setErr(null);
     try {
-      // Effective tab: drop the type-only tabs (invoices/simple_links) into the
-      // typeFilter knob so backend tab='all' is used and the type LEFT JOIN drives the rest.
       let effectiveTab = tab;
       let effectiveType = typeFilter;
       if (tab === 'invoices') { effectiveTab = 'all'; effectiveType = 'invoice'; }
@@ -182,6 +188,7 @@ export default function PaymentLinks() {
       await api.post(`/api/payment-links/${row.id}/cancel`, {});
       toast.success('Link cancelled');
       setCancelModal(null);
+      // If the cancelled row is currently selected, refresh slide-over after reload
       load();
     } catch (e) { toast.error(e.message); }
   }
@@ -191,8 +198,12 @@ export default function PaymentLinks() {
   const expiredCount = summary.expired_count ?? 0;
   const fpFee = canSeeFee ? (summary.total_fp_fee_earned || 0) : null;
 
+  const activeFilterCount = [
+    q, clientFilter, createdByFilter, typeFilter, dateFrom, dateTo,
+  ].filter(Boolean).length + (tab !== 'all' ? 1 : 0);
+
   return (
-    <div className="p-6 max-w-[1700px] mx-auto">
+    <div className="p-4 md:p-6 max-w-[1700px] mx-auto">
       <PageHeader
         title="Payment Requests"
         subtitle={`${summary.total_count ?? data.total} requests · ${summary.pending_count ?? 0} pending · ${summary.paid_count ?? 0} paid`}
@@ -202,11 +213,7 @@ export default function PaymentLinks() {
             setOpen={setNewMenuOpen}
             onPick={(kind) => {
               setNewMenuOpen(false);
-              navigate('/virtual-terminal'); // VT has both Payment Link and Invoice tabs
-              setTimeout(() => {
-                // Hint via window.history state so VT can preselect the tab if it ever reads it.
-                // (No-op if VT doesn't read it.)
-              }, 0);
+              navigate('/virtual-terminal');
               if (kind === 'invoice') sessionStorage.setItem('vt_default_charge_type', 'invoice');
               else sessionStorage.setItem('vt_default_charge_type', 'link');
             }}
@@ -225,8 +232,8 @@ export default function PaymentLinks() {
         {canSeeFee && <StatCard label="FP fee earned" value={money(fpFee)} tone="accent" />}
       </div>
 
-      {/* Tabs */}
-      <Card className="p-2 mb-3">
+      {/* Filter row 1 — status tabs (sticky) */}
+      <Card className="p-2 mb-2" style={{ position: 'sticky', top: 0, zIndex: 5 }}>
         <div className="flex flex-wrap gap-1">
           {TABS.map((t) => {
             const cnt = ({
@@ -257,13 +264,13 @@ export default function PaymentLinks() {
         </div>
       </Card>
 
-      {/* Filters */}
+      {/* Filter row 2 — search + dropdowns */}
       <Card className="p-3 mb-3">
         <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
           <div className="md:col-span-2 relative">
             <Search size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
             <Input
-              placeholder="Search invoice #, description, email…"
+              placeholder="Search invoice #, email, description…"
               value={q}
               onChange={(e) => { setQ(e.target.value); setPage(1); }}
               style={{ paddingLeft: 36 }}
@@ -286,45 +293,58 @@ export default function PaymentLinks() {
               {users.map((u) => <option key={u.id} value={u.id}>{u.name || u.email}</option>)}
             </Select>
           )}
-          <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} />
-          <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setPage(1); }} />
+          <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} title="From" />
+          <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setPage(1); }} title="To" />
         </div>
-        {(q || clientFilter || createdByFilter || typeFilter || dateFrom || dateTo || tab !== 'all') && (
-          <div className="mt-2">
+        {activeFilterCount > 0 && (
+          <div className="mt-2 flex items-center gap-3">
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              {activeFilterCount} filter{activeFilterCount === 1 ? '' : 's'} active
+            </span>
             <button onClick={resetFilters} style={{
               fontSize: 12, color: 'var(--accent)', background: 'transparent',
-              border: 'none', cursor: 'pointer',
-            }}>Reset filters</button>
+              border: 'none', cursor: 'pointer', fontWeight: 500,
+            }}>Clear filters</button>
           </div>
         )}
       </Card>
 
-      {/* Table */}
-      <Card style={{ overflow: 'visible' }}>
-        <Table>
+      {/* Mobile card list (md:hidden) */}
+      <div className="md:hidden space-y-2">
+        {loading && <Card className="p-4 text-center" style={{ color: 'var(--text-secondary)' }}>Loading…</Card>}
+        {!loading && data.results.length === 0 && (
+          <Card className="p-6 text-center" style={{ color: 'var(--text-secondary)' }}>No payment requests yet</Card>
+        )}
+        {!loading && data.results.map((r) => (
+          <MobileCard key={r.id} row={r} canSeeFee={canSeeFee} onOpen={() => setSelected(r)} />
+        ))}
+      </div>
+
+      {/* Desktop table (hidden on mobile) */}
+      <Card className="hidden md:block" style={{ overflow: 'visible' }}>
+        <Table style={{ tableLayout: 'fixed', width: '100%' }}>
           <Thead>
             <Tr>
-              <Th style={{ width: 28 }}></Th>
               <Th style={{ width: 80 }}>Type</Th>
-              <Th>Status</Th>
-              <Th>Created</Th>
-              <Th>Client</Th>
-              <Th>Customer</Th>
-              <Th className="text-right">Amount</Th>
+              <Th style={{ width: 100 }}>Status</Th>
+              <Th style={{ width: 100 }}>Created</Th>
+              <Th style={{ width: 140 }}>Client</Th>
+              <Th style={{ width: 160 }}>Customer</Th>
+              <Th style={{ width: 90, textAlign: 'right' }}>Amount</Th>
               <Th>Description</Th>
-              <Th>Activity</Th>
-              <Th>Expires</Th>
-              {canSeeFee && <Th className="text-right">FP fee</Th>}
-              <Th>Tx</Th>
-              <Th style={{ width: 56 }}></Th>
+              <Th style={{ width: 120 }}>Activity</Th>
+              <Th style={{ width: 100 }}>Expires</Th>
+              {canSeeFee && <Th style={{ width: 80, textAlign: 'right' }}>FP fee</Th>}
+              <Th style={{ width: 60 }}>Tx</Th>
+              <Th style={{ width: 50 }}></Th>
             </Tr>
           </Thead>
           <tbody>
             {loading && (
-              <Tr><Td colSpan={canSeeFee ? 13 : 12} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>Loading…</Td></Tr>
+              <Tr><Td colSpan={canSeeFee ? 12 : 11} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>Loading…</Td></Tr>
             )}
             {!loading && data.results.length === 0 && (
-              <Tr><Td colSpan={canSeeFee ? 13 : 12} style={{ textAlign: 'center', padding: '32px 16px' }}>
+              <Tr><Td colSpan={canSeeFee ? 12 : 11} style={{ textAlign: 'center', padding: '32px 16px' }}>
                 <div style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>
                   {tab === 'all' && !typeFilter ? 'No payment requests yet' : 'No matches'}
                 </div>
@@ -334,12 +354,12 @@ export default function PaymentLinks() {
               <PaymentRow
                 key={r.id}
                 row={r}
+                isSelected={selected?.id === r.id}
                 isClientUser={isClientUser}
                 canSeeFee={canSeeFee}
                 canEdit={canEdit}
                 canDelete={canDelete}
-                expanded={expanded === r.id}
-                onToggle={() => setExpanded((id) => id === r.id ? null : r.id)}
+                onSelect={() => setSelected(r)}
                 onCopyUrl={() => { copyAndLog(r); toast.success('Link copied'); }}
                 onShowQr={() => setQrModal(r)}
                 onOpenPage={() => window.open(r.url || `https://portal.foundapay.com/pay/${r.token}`, '_blank')}
@@ -363,6 +383,18 @@ export default function PaymentLinks() {
           </div>
         </div>
       )}
+
+      {/* Right-side detail slide-over */}
+      <PaymentDetailSlideOver
+        row={selected}
+        onClose={() => setSelected(null)}
+        canSeeFee={canSeeFee}
+        canEdit={canEdit}
+        onCopyUrl={() => { if (selected) { copyAndLog(selected); toast.success('Link copied'); } }}
+        onShowQr={() => selected && setQrModal(selected)}
+        onResendEmail={() => selected && resendEmail(selected)}
+        onCancel={() => selected && setCancelModal(selected)}
+      />
 
       {qrModal && <QrModal row={qrModal} onClose={() => setQrModal(null)} />}
       {cancelModal && (
@@ -434,82 +466,109 @@ function StatCard({ label, value, tone }) {
   );
 }
 
-// ━━━ Row + expansion ─────────────────────────────────────────
-function PaymentRow({ row, isClientUser, canSeeFee, canEdit, canDelete, expanded, onToggle,
-                     onCopyUrl, onShowQr, onOpenPage, onResendEmail, onCancel }) {
+// ━━━ Mobile card list row ─────────────────────────────────
+function MobileCard({ row, canSeeFee, onOpen }) {
   const sd = statusDisplay(row.status);
-  const expires = row.status === 'paid'
-    ? '—'
-    : (row.expires_at ? relativeTime(row.expires_at) : '—');
   const isInvoice = row.type === 'invoice' || !!row.invoice;
   const act = activitySummary(row);
-  const colSpan = canSeeFee ? 13 : 12;
-
   return (
-    <>
-      <Tr style={{ cursor: 'pointer' }} onClick={onToggle}>
-        <Td style={{ width: 28 }}>
-          {expanded
-            ? <ChevronDown size={14} style={{ color: 'var(--text-tertiary)' }} />
-            : <ChevronRight size={14} style={{ color: 'var(--text-tertiary)' }} />
-          }
-        </Td>
-        <Td>
+    <Card className="p-3" onClick={onOpen} style={{ cursor: 'pointer' }}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+        <div className="flex items-center gap-2">
           {isInvoice
             ? <Badge tone="accent">🧾 Invoice</Badge>
-            : <Badge tone="info">🔗 Link</Badge>
-          }
-        </Td>
-        <Td><Badge tone={sd.tone}>{sd.label}</Badge></Td>
-        <Td title={row.created_at}>{relativeTime(row.created_at)}</Td>
-        <Td>{row.client?.name || '—'}</Td>
-        <Td>
-          {row.customer_email || row.customer_name ? (
-            <div style={{ fontSize: 12 }}>
-              <div>{row.customer_name || '—'}</div>
-              {row.customer_email && <div style={{ color: 'var(--text-tertiary)' }}>{row.customer_email}</div>}
-            </div>
-          ) : '—'}
-        </Td>
-        <Td className="text-right font-mono">{money(row.amount)}</Td>
-        <Td title={row.description} style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {isInvoice && row.invoice?.invoice_number
-            ? <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>{row.invoice.invoice_number}</span>
-            : (row.description || '—')}
-        </Td>
-        <Td>
-          <ActivityCell summary={act} />
-        </Td>
-        <Td className="text-xs" style={{ color: 'var(--text-tertiary)' }}>{expires}</Td>
-        {canSeeFee && <Td className="text-right font-mono">{row.fp_fee != null ? money(row.fp_fee) : '—'}</Td>}
-        <Td>
-          {row.transaction?.id ? (
-            <a href={`/transactions?tx=${row.transaction.id}`} style={{ color: 'var(--accent)', fontSize: 12 }} onClick={(e) => e.stopPropagation()}>
-              #{row.transaction.id}
-            </a>
-          ) : '—'}
-        </Td>
-        <Td onClick={(e) => e.stopPropagation()}>
-          <KebabMenu
-            row={row}
-            canEdit={canEdit}
-            canDelete={canDelete}
-            onCopyUrl={onCopyUrl}
-            onShowQr={onShowQr}
-            onOpenPage={onOpenPage}
-            onResendEmail={onResendEmail}
-            onCancel={onCancel}
-          />
-        </Td>
-      </Tr>
-      {expanded && (
-        <Tr style={{ background: 'var(--bg-tertiary)' }}>
-          <Td colSpan={colSpan} style={{ padding: 0 }}>
-            <ExpandedView row={row} canSeeFee={canSeeFee} onCopyUrl={onCopyUrl} onShowQr={onShowQr} />
-          </Td>
-        </Tr>
+            : <Badge tone="info">🔗 Link</Badge>}
+          <Badge tone={sd.tone}>{sd.label}</Badge>
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{money(row.amount)}</div>
+      </div>
+      <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>
+        {row.client?.name || '—'} · {row.customer_name || row.customer_email || '—'}
+      </div>
+      {(isInvoice && row.invoice?.invoice_number) && (
+        <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+          {row.invoice.invoice_number}
+        </div>
       )}
-    </>
+      <div className="flex items-center justify-between" style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>
+        <span>{act.text}</span>
+        <span>{relativeTime(row.created_at)}</span>
+      </div>
+    </Card>
+  );
+}
+
+// ━━━ Desktop table row ─────────────────────────────────────
+function PaymentRow({ row, isSelected, canSeeFee, canEdit, canDelete,
+                     onSelect, onCopyUrl, onShowQr, onOpenPage, onResendEmail, onCancel }) {
+  const sd = statusDisplay(row.status);
+  const expires = row.status === 'paid' ? '—' : (row.expires_at ? relativeTime(row.expires_at) : '—');
+  const isInvoice = row.type === 'invoice' || !!row.invoice;
+  const act = activitySummary(row);
+
+  return (
+    <Tr
+      onClick={onSelect}
+      style={{
+        cursor: 'pointer',
+        background: isSelected ? 'var(--bg-hover)' : undefined,
+        borderLeft: isSelected ? '3px solid var(--accent)' : '3px solid transparent',
+        transition: 'background 120ms',
+      }}
+    >
+      <Td style={{ width: 80 }}>
+        {isInvoice
+          ? <Badge tone="accent">🧾 Invoice</Badge>
+          : <Badge tone="info">🔗 Link</Badge>}
+      </Td>
+      <Td style={{ width: 100 }}><Badge tone={sd.tone}>{sd.label}</Badge></Td>
+      <Td style={{ width: 100, fontSize: 12 }} title={row.created_at}>{relativeTime(row.created_at)}</Td>
+      <Td style={{ width: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.client?.name || '—'}</Td>
+      <Td style={{ width: 160, overflow: 'hidden' }}>
+        {row.customer_email || row.customer_name ? (
+          <div style={{ fontSize: 12, lineHeight: 1.3 }}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.customer_name || '—'}</div>
+            {row.customer_email && (
+              <div style={{ color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {row.customer_email}
+              </div>
+            )}
+          </div>
+        ) : '—'}
+      </Td>
+      <Td style={{ width: 90, textAlign: 'right', fontFamily: 'ui-monospace, monospace' }}>{money(row.amount)}</Td>
+      <Td title={row.description} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {isInvoice && row.invoice?.invoice_number
+          ? <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>{row.invoice.invoice_number}</span>
+          : (row.description || '—')}
+      </Td>
+      <Td style={{ width: 120 }}><ActivityCell summary={act} /></Td>
+      <Td style={{ width: 100, fontSize: 11, color: 'var(--text-tertiary)' }}>{expires}</Td>
+      {canSeeFee && (
+        <Td style={{ width: 80, textAlign: 'right', fontFamily: 'ui-monospace, monospace' }}>
+          {row.fp_fee != null ? money(row.fp_fee) : '—'}
+        </Td>
+      )}
+      <Td style={{ width: 60 }}>
+        {row.transaction?.id ? (
+          <a href={`/transactions?tx=${row.transaction.id}`} style={{ color: 'var(--accent)', fontSize: 12 }} onClick={(e) => e.stopPropagation()}>
+            #{row.transaction.id}
+          </a>
+        ) : '—'}
+      </Td>
+      <Td style={{ width: 50 }} onClick={(e) => e.stopPropagation()}>
+        <KebabMenu
+          row={row}
+          canEdit={canEdit}
+          canDelete={canDelete}
+          onCopyUrl={onCopyUrl}
+          onShowQr={onShowQr}
+          onOpenPage={onOpenPage}
+          onResendEmail={onResendEmail}
+          onCancel={onCancel}
+        />
+      </Td>
+    </Tr>
   );
 }
 
@@ -521,18 +580,22 @@ function ActivityCell({ summary }) {
     muted: 'var(--text-tertiary)',
   })[summary.tone];
   return (
-    <div style={{ fontSize: 11, lineHeight: 1.4, color, fontWeight: summary.tone === 'success' ? 600 : 400 }}>
-      {summary.lines.map((l, i) => <div key={i}>{l}</div>)}
+    <div style={{ fontSize: 12, color, fontWeight: summary.tone === 'success' ? 600 : 400 }}>
+      {summary.text}
     </div>
   );
 }
 
-// ━━━ Expanded inline view ─────────────────────────────────
-function ExpandedView({ row, canSeeFee, onCopyUrl, onShowQr }) {
+// ━━━ Slide-over: full payment-request detail ──────────────
+function PaymentDetailSlideOver({ row, onClose, canSeeFee, canEdit, onCopyUrl, onShowQr, onResendEmail, onCancel }) {
   const [detail, setDetail] = useState(null);
   useEffect(() => {
+    if (!row) { setDetail(null); return; }
+    setDetail(null);
     api.get(`/api/payment-links/${row.id}`).then(setDetail).catch(() => setDetail({ link: row, timeline: [] }));
-  }, [row.id]);
+  }, [row?.id]);
+
+  if (!row) return null;
   const link = detail?.link || row;
   const tl = detail?.timeline || [];
   const url = link.url || `https://portal.foundapay.com/pay/${link.token}`;
@@ -542,98 +605,120 @@ function ExpandedView({ row, canSeeFee, onCopyUrl, onShowQr }) {
   if (typeof lineItems === 'string') {
     try { lineItems = JSON.parse(lineItems); } catch { lineItems = []; }
   }
+  const sd = statusDisplay(link.status);
+  const isPending = !['paid', 'cancelled', 'failed', 'refunded', 'expired'].includes(link.status);
+  const headerLabel = isInvoice
+    ? (inv?.invoice_number || link.invoice_number || `#${String(link.id).slice(0, 8)}`)
+    : (`Link · ${String(link.token || link.id).slice(0, 8)}…`);
 
   return (
-    <div style={{
-      padding: 24,
-      display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-      gap: 20,
-      background: 'var(--bg-tertiary)',
-    }}>
+    <SlideOver
+      open
+      onClose={onClose}
+      title={headerLabel}
+      badge={<Badge tone={sd.tone}>{sd.label}</Badge>}
+      width={420}
+    >
+      <div className="px-5 py-4" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-      {/* LEFT — URL + actions + invoice details */}
-      <div style={{ minWidth: 0 }}>
-        <Card className="p-4 mb-3" style={{ background: 'var(--bg-secondary)' }}>
-          <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', marginBottom: 6, fontWeight: 600 }}>Public URL</div>
+        {/* SECTION 1 — Payment URL + QR */}
+        <div>
+          <SectionLabel>Payment URL</SectionLabel>
           <div title={url} style={{
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-            fontSize: 11,
-            color: 'var(--text-secondary)',
-            background: 'var(--bg-primary)',
-            padding: '8px 10px',
-            borderRadius: 8,
-            border: '1px solid var(--border)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            marginBottom: 10,
+            fontSize: 11, color: 'var(--text-secondary)',
+            background: 'var(--bg-primary)', padding: '8px 10px', borderRadius: 8,
+            border: '1px solid var(--border)', overflow: 'hidden',
+            textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 8,
           }}>{url}</div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex gap-2 flex-wrap" style={{ marginBottom: 10 }}>
             <Button variant="secondary" size="sm" onClick={onCopyUrl}><Copy size={12} /> Copy</Button>
             <Button variant="secondary" size="sm" onClick={() => window.open(url, '_blank')}><ExternalLink size={12} /> Open</Button>
             <Button variant="secondary" size="sm" onClick={onShowQr}><QrCode size={12} /> QR</Button>
           </div>
-        </Card>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <img
+              src={`/api/payment-links/${link.id}/qr.png`}
+              alt="QR"
+              style={{ width: 120, height: 120, borderRadius: 8, border: '1px solid var(--border)', background: 'white' }}
+            />
+            <a
+              href={`/api/payment-links/${link.id}/qr.png`}
+              download={`qr-${link.invoice_number || link.id}.png`}
+              style={{ fontSize: 12, color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <Download size={12} /> Download QR
+            </a>
+          </div>
+        </div>
 
+        {/* SECTION 2 — Details */}
+        <div>
+          <SectionLabel>Details</SectionLabel>
+          <DetailRow label="Type" value={isInvoice ? 'Invoice' : 'Simple Link'} />
+          <DetailRow label="Client" value={link.client?.name || '—'} />
+          <DetailRow label="Customer"
+            value={link.customer_name || link.customer_email
+              ? <span>{link.customer_name || ''}{link.customer_email && <span style={{ color: 'var(--text-tertiary)' }}> · {link.customer_email}</span>}</span>
+              : '—'} />
+          <DetailRow label="Amount" value={<span style={{ fontSize: 16, fontWeight: 700 }}>{money(link.amount)}</span>} />
+          {canSeeFee && link.fp_fee != null && (
+            <>
+              <DetailRow label="FP fee" value={money(link.fp_fee)} />
+              <DetailRow label="Net to client" value={money((parseFloat(link.amount) || 0) - (parseFloat(link.fp_fee) || 0))} />
+            </>
+          )}
+          <DetailRow label="Created" value={
+            <span>
+              {new Date(link.created_at).toLocaleString()}
+              {link.created_by_user?.name && <span style={{ color: 'var(--text-tertiary)' }}> · {link.created_by_user.name}</span>}
+            </span>
+          } />
+          <DetailRow
+            label="Expires"
+            value={link.status === 'paid'
+              ? <span style={{ color: 'var(--success)' }}>Paid</span>
+              : (link.expires_at ? new Date(link.expires_at).toLocaleString() : '—')}
+          />
+        </div>
+
+        {/* SECTION 3 — Invoice Details */}
         {isInvoice && inv && (
-          <Card className="p-4" style={{ background: 'var(--bg-secondary)' }}>
-            <div className="flex items-baseline justify-between mb-2">
-              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', fontWeight: 600 }}>Invoice</div>
-              <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>{inv.invoice_number}</div>
-            </div>
-
-            {(link.customer_name || link.customer_email) && (
-              <div style={{ marginBottom: 10, padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
-                <div style={{ fontSize: 10, textTransform: 'uppercase', color: 'var(--text-tertiary)', letterSpacing: '0.06em', marginBottom: 2 }}>Bill to</div>
-                {link.customer_name && <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>{link.customer_name}</div>}
-                {link.customer_email && <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{link.customer_email}</div>}
-              </div>
-            )}
-
+          <div>
+            <SectionLabel>Invoice details</SectionLabel>
+            <DetailRow label="Invoice #" value={<span style={{ fontFamily: 'ui-monospace, monospace', color: 'var(--accent)' }}>{inv.invoice_number}</span>} />
+            {inv.due_date && <DetailRow label="Due date" value={dateOnly(inv.due_date)} />}
             {lineItems.length > 0 && (
-              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', marginBottom: 10 }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', marginTop: 8 }}>
                 <thead>
                   <tr style={{ color: 'var(--text-tertiary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>Description</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right', width: 50, fontWeight: 600 }}>Qty</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right', width: 90, fontWeight: 600 }}>Amount</th>
+                    <th style={{ padding: '6px 6px', textAlign: 'left', fontWeight: 600 }}>Description</th>
+                    <th style={{ padding: '6px 6px', textAlign: 'right', width: 36, fontWeight: 600 }}>Qty</th>
+                    <th style={{ padding: '6px 6px', textAlign: 'right', width: 80, fontWeight: 600 }}>Amount</th>
                   </tr>
                 </thead>
                 <tbody>
                   {lineItems.map((li, i) => (
                     <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
-                      <td style={{ padding: '8px', color: 'var(--text-primary)' }}>{li.description}</td>
-                      <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'ui-monospace, monospace', color: 'var(--text-secondary)' }}>{li.quantity}</td>
-                      <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'ui-monospace, monospace', color: 'var(--text-primary)' }}>{money(li.line_total)}</td>
+                      <td style={{ padding: '6px', color: 'var(--text-primary)' }}>{li.description}</td>
+                      <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'ui-monospace, monospace', color: 'var(--text-secondary)' }}>{li.quantity}</td>
+                      <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'ui-monospace, monospace', color: 'var(--text-primary)' }}>{money(li.line_total)}</td>
                     </tr>
                   ))}
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '6px', fontWeight: 600 }}>Total</td>
+                    <td></td>
+                    <td style={{ padding: '6px', textAlign: 'right', fontFamily: 'ui-monospace, monospace', fontWeight: 600 }}>{money(inv.total_amount)}</td>
+                  </tr>
                 </tbody>
               </table>
             )}
-            <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8 }}>
-              <Row label="Subtotal" value={money(inv.subtotal)} />
-              {parseFloat(inv.discount_amount) > 0 && <Row label="Discount" value={`-${money(inv.discount_amount)}`} />}
-              {parseFloat(inv.tax_rate) > 0 && (
-                <Row label={`Tax (${(parseFloat(inv.tax_rate) * 100).toFixed(2)}%)`} value={money(inv.tax_amount)} />
-              )}
-              <Row label="Total" value={money(inv.total_amount)} bold />
-            </div>
-
-            {inv.due_date && (
-              <div style={{ marginTop: 10, padding: '8px 10px', background: 'var(--accent-dim)', borderRadius: 8, fontSize: 12, color: 'var(--accent)', display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ fontWeight: 600 }}>Due date</span>
-                <span>{dateOnly(inv.due_date)}</span>
-              </div>
-            )}
-          </Card>
+          </div>
         )}
-      </div>
 
-      {/* RIGHT — timeline */}
-      <div style={{ minWidth: 0 }}>
-        <Card className="p-4" style={{ background: 'var(--bg-secondary)' }}>
-          <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', fontWeight: 600, marginBottom: 12 }}>Activity timeline</div>
+        {/* SECTION 4 — Activity timeline */}
+        <div>
+          <SectionLabel>Activity timeline</SectionLabel>
           {tl.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>No events recorded yet.</div>}
           {tl.length > 0 && (
             <div style={{ position: 'relative', paddingLeft: 14 }}>
@@ -641,25 +726,56 @@ function ExpandedView({ row, canSeeFee, onCopyUrl, onShowQr }) {
               {tl.map((e, i) => <TimelineRow key={e.id} ev={e} isLast={i === tl.length - 1} />)}
             </div>
           )}
+        </div>
 
-          {canSeeFee && link.status === 'paid' && (
-            <div style={{ marginTop: 14, padding: 12, background: 'var(--bg-primary)', borderRadius: 8, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', fontWeight: 600, marginBottom: 6 }}>Settlement</div>
-              <Row label="Gross" value={money(link.amount)} />
-              <Row label="FP fee" value={money(link.fp_fee || 0)} />
-              <Row label="Net to client" value={money((parseFloat(link.amount) || 0) - (parseFloat(link.fp_fee) || 0))} bold />
-              {link.transaction?.id && (
-                <Row label="Transaction" value={<a href={`/transactions?tx=${link.transaction.id}`} style={{ color: 'var(--accent)' }}>#{link.transaction.id}</a>} />
-              )}
-            </div>
-          )}
-        </Card>
+        {/* SECTION 5 — Actions */}
+        <div>
+          <SectionLabel>Actions</SectionLabel>
+          <div className="flex flex-wrap gap-2">
+            {link.customer_email && (
+              <Button variant="secondary" size="sm" onClick={onResendEmail}><Mail size={12} /> Resend Email</Button>
+            )}
+            {canEdit && isPending && (
+              <Button variant="danger" size="sm" onClick={onCancel}><XCircle size={12} /> Cancel</Button>
+            )}
+            {link.transaction?.id && (
+              <a href={`/transactions?tx=${link.transaction.id}`}>
+                <Button variant="secondary" size="sm"><Eye size={12} /> View Transaction</Button>
+              </a>
+            )}
+            {isInvoice && inv?.id && (
+              <a href={`/api/invoices/${inv.id}/pdf`} target="_blank" rel="noreferrer">
+                <Button variant="secondary" size="sm"><Download size={12} /> Invoice PDF</Button>
+              </a>
+            )}
+          </div>
+        </div>
       </div>
+    </SlideOver>
+  );
+}
+
+function SectionLabel({ children }) {
+  return (
+    <div style={{
+      fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
+      color: 'var(--text-tertiary)', fontWeight: 600, marginBottom: 8,
+    }}>{children}</div>
+  );
+}
+
+function DetailRow({ label, value }) {
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '110px 1fr', gap: 8,
+      fontSize: 13, padding: '4px 0',
+    }}>
+      <span style={{ color: 'var(--text-tertiary)' }}>{label}</span>
+      <span style={{ color: 'var(--text-primary)' }}>{value}</span>
     </div>
   );
 }
 
-// Per-action icon + label + dot color for the timeline
 const TIMELINE_LOOKUP = {
   'payment_link.created':                 { icon: '🔗', label: 'Link created',         color: 'var(--accent)' },
   'payment_link.copied':                  { icon: '📋', label: 'Link copied',          color: 'var(--info)' },
@@ -691,7 +807,6 @@ function TimelineRow({ ev, isLast }) {
 
   return (
     <div style={{ position: 'relative', paddingBottom: isLast ? 0 : 12, paddingLeft: 16 }}>
-      {/* Dot */}
       <div style={{
         position: 'absolute', left: -10, top: 4,
         width: 12, height: 12, borderRadius: '50%',
@@ -707,15 +822,6 @@ function TimelineRow({ ev, isLast }) {
         {ev.actor?.name && <> · {ev.actor.name}</>}
         {detail.length > 0 && <> · {detail.join(' · ')}</>}
       </div>
-    </div>
-  );
-}
-
-function Row({ label, value, bold }) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontWeight: bold ? 600 : 400 }}>
-      <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
-      <span style={{ fontFamily: 'ui-monospace, monospace' }}>{value}</span>
     </div>
   );
 }
@@ -777,7 +883,7 @@ function KebabMenu({ row, canEdit, canDelete, onCopyUrl, onShowQr, onOpenPage, o
     <>
       <button
         ref={btnRef}
-        onClick={() => setOpen((o) => !o)}
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
         title="Actions"
         style={{
           background: open ? 'var(--bg-hover)' : 'transparent',
