@@ -210,9 +210,16 @@ export default function ProcessPayment() {
       .then((r) => {
         const rows = r.rows || [];
         setBrands(rows);
-        // Auto-pick the default brand (if any). Don't override a manual choice.
+        // Honor a brand pre-selection coming from the client portal Home →
+        // "Generate Link" CTA. Falls back to default brand → first brand.
+        const pre = sessionStorage.getItem('vt_default_brand_id');
         setForm((f) => {
           if (f.brand_id && rows.some((b) => b.id === f.brand_id)) return f;
+          const preselected = pre && rows.find((b) => b.id === pre);
+          if (preselected) {
+            sessionStorage.removeItem('vt_default_brand_id');
+            return { ...f, brand_id: preselected.id, brand_name: preselected.name };
+          }
           const def = rows.find((b) => b.is_default) || rows[0];
           return def
             ? { ...f, brand_id: def.id, brand_name: def.name }

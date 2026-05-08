@@ -574,6 +574,14 @@ function TerminalTab({ access, clientName }) {
 // Home tab — welcome, stats, limit usage, quick actions, recent activity
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function ClientHomeTab({ data, perms, usage, onQuickAction }) {
+  const [brands, setBrands] = useState([]);
+  useEffect(() => {
+    if (!data?.client?.id) return;
+    api.get(`/api/clients/${data.client.id}/brands`)
+      .then((r) => setBrands(r.rows || []))
+      .catch(() => setBrands([]));
+  }, [data?.client?.id]);
+
   if (!data) return null;
   const txs = data.transactions || [];
   const links = data.payment_links || [];
@@ -584,6 +592,18 @@ function ClientHomeTab({ data, perms, usage, onQuickAction }) {
   const pendingLinks = links.filter((l) => !['paid', 'cancelled', 'failed', 'expired', 'refunded'].includes(l.status)).length;
   const balanceDue = parseFloat(data.balance?.current_balance) || 0;
   const showUsage = perms?.show_usage_to_user && usage;
+
+  // Count payment_links this month per brand_id (when the link carries one).
+  const brandLinkCounts = (() => {
+    const m = {};
+    for (const l of links) {
+      if (!l.brand_id) continue;
+      const created = new Date(l.created_at);
+      if (created < monthStart) continue;
+      m[l.brand_id] = (m[l.brand_id] || 0) + 1;
+    }
+    return m;
+  })();
 
   // Quick-action visibility from perms (always show what's enabled in user_permissions)
   const showVT = perms?.can_virtual_terminal !== false; // default true on portal until configured
@@ -620,6 +640,45 @@ function ClientHomeTab({ data, perms, usage, onQuickAction }) {
           <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>{money(data.balance?.reserve_held)}</div>
         </Card>
       </div>
+
+      {/* My brands — one card per active brand with this-month link counts */}
+      {brands.length > 0 && (
+        <div className="mb-5">
+          <h3 style={{ fontSize: 13, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-secondary)', marginBottom: 12 }}>
+            My brands
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {brands.map((b) => (
+              <Card key={b.id} className="p-4" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <div style={{
+                  width: 56, height: 56, flexShrink: 0,
+                  borderRadius: 10, border: '1px solid var(--border)',
+                  background: b.brand_color || 'var(--bg-tertiary)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  overflow: 'hidden', color: 'white', fontWeight: 700, fontSize: 16,
+                }}>
+                  {b.logo_url
+                    ? <img src={b.logo_url} alt={b.name} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                    : (b.name || '?').slice(0, 2).toUpperCase()}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                    <div style={{ fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</div>
+                    {b.is_default && <span style={{ fontSize: 9, color: 'var(--accent)', background: 'var(--accent-dim)', padding: '1px 5px', borderRadius: 4, fontWeight: 600 }}>DEFAULT</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 8 }}>
+                    {brandLinkCounts[b.id] || 0} {brandLinkCounts[b.id] === 1 ? 'payment' : 'payments'} this month
+                  </div>
+                  <Button size="sm" onClick={() => {
+                    sessionStorage.setItem('vt_default_brand_id', b.id);
+                    onQuickAction('terminal');
+                  }}>Generate Link →</Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Limit usage */}
       {showUsage && (

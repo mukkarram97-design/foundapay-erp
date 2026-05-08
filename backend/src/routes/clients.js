@@ -47,8 +47,27 @@ function blockClientUser(req, res, next) {
 // ── GET /api/clients ─────────────────────────────────────────
 router.get('/', blockClientUser, async (req, res) => {
   try {
+    // ━━━ Computed balance_owed ━━━
+    // Always derived from transactions, never read from the stored column.
+    //   balance_owed = opening_balance
+    //                + Σ net_amount   (type='Received', status='Completed')
+    //                - Σ gross_amount (type='Sent',     status='Completed')
+    // The stored c.balance_owed column is kept for migration/audit but no
+    // longer surfaced — staff manual-override workflow is being retired in
+    // favor of the derived value. Returned as `balance_owed` (same name) so
+    // the frontend displays it without code changes.
     const r = await pool.query(`
-      SELECT c.*,
+      SELECT c.id, c.name, c.company_name, c.contact_person, c.email, c.phone,
+             c.whatsapp, c.country, c.status,
+             c.card_pct, c.wire_pct, c.cheque_pct, c.ach_pct, c.zelle_pct,
+             c.other_terms, c.opening_balance, c.our_revenue,
+             c.settlement_cycle, c.notes, c.created_at, c.updated_at,
+             c.logo_url, c.is_deleted,
+             c.balance_owed AS balance_owed_stored,
+             COALESCE(c.opening_balance, 0)
+               + COALESCE(SUM(t.net_amount)   FILTER (WHERE t.type = 'Received' AND t.status = 'Completed' AND t.is_deleted = false), 0)
+               - COALESCE(SUM(t.gross_amount) FILTER (WHERE t.type = 'Sent'     AND t.status = 'Completed' AND t.is_deleted = false), 0)
+               AS balance_owed,
              COALESCE(SUM(t.gross_amount) FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0) AS total_gross_received,
              COALESCE(SUM(t.fee_amount)   FILTER (WHERE t.type = 'Received' AND t.is_deleted = false), 0) AS total_revenue,
              COUNT(t.id) FILTER (WHERE t.is_deleted = false) AS tx_count

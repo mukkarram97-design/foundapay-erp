@@ -181,11 +181,11 @@ router.post('/', blockClientUser, async (req, res) => {
              customer_name, customer_email, customer_phone, customer_address,
              issue_date, due_date,
              line_items, subtotal, tax_rate, tax_amount, discount_amount, total_amount, currency,
-             notes, footer_text, status, created_by)
+             notes, footer_text, status, brand_id, created_by)
           VALUES ($1,$2,$3,$4,$5,$6,$7,
                   COALESCE($8::date, CURRENT_DATE), $9,
                   $10::jsonb,$11,$12,$13,$14,$15,COALESCE($16,'USD'),
-                  $17,$18,COALESCE($19,'draft'),$20)
+                  $17,$18,COALESCE($19,'draft'),$20,$21)
           RETURNING *
         `, [
           invoiceNumber,
@@ -197,6 +197,7 @@ router.post('/', blockClientUser, async (req, res) => {
           totals.subtotal, b.tax_rate || 0, totals.tax_amount,
           totals.discount_amount, totals.total_amount, b.currency,
           b.notes || null, b.footer_text || null, b.status,
+          b.brand_id || null,
           req.user.id,
         ]);
         break;
@@ -443,10 +444,18 @@ router.get('/:id/pdf', async (req, res) => {
              c.email AS client_email, c.phone AS client_phone,
              e.legal_name AS entity_name, e.logo_url AS entity_logo_url,
              e.address AS entity_address, e.phone AS entity_phone,
-             e.owner_email AS entity_email
+             e.owner_email AS entity_email,
+             br.name                  AS brand_name,
+             br.logo_url              AS brand_logo_url,
+             br.brand_color           AS brand_color,
+             br.statement_descriptor  AS brand_descriptor,
+             br.descriptor_note       AS brand_descriptor_note,
+             br.support_email         AS brand_support_email,
+             br.support_phone         AS brand_support_phone
         FROM invoices i
-        LEFT JOIN clients c  ON c.id = i.client_id
-        LEFT JOIN entities e ON e.id = i.entity_id
+        LEFT JOIN clients c       ON c.id = i.client_id
+        LEFT JOIN entities e      ON e.id = i.entity_id
+        LEFT JOIN client_brands br ON br.id = i.brand_id
        WHERE i.id = $1 AND i.is_deleted = false
     `, [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
@@ -456,8 +465,10 @@ router.get('/:id/pdf', async (req, res) => {
     res.setHeader('Content-Disposition',
       `inline; filename="${inv.invoice_number}.pdf"`);
 
+    // Brand header: brand wins over entity over client. Brand also gets
+    // its own footer descriptor block (chargeback mitigation).
     buildInvoice(inv, {
-      logo_url: inv.entity_logo_url || inv.client_logo_url,
+      logo_url: inv.brand_logo_url || inv.entity_logo_url || inv.client_logo_url,
       client_name: inv.client_name,
       client_email: inv.client_email,
       client_phone: inv.client_phone,
@@ -465,6 +476,12 @@ router.get('/:id/pdf', async (req, res) => {
       entity_address: inv.entity_address,
       entity_phone: inv.entity_phone,
       entity_email: inv.entity_email,
+      brand_name: inv.brand_name,
+      brand_color: inv.brand_color,
+      brand_descriptor: inv.brand_descriptor,
+      brand_descriptor_note: inv.brand_descriptor_note,
+      brand_support_email: inv.brand_support_email,
+      brand_support_phone: inv.brand_support_phone,
     }, res);
   } catch (err) {
     console.error('[invoices pdf]', err);

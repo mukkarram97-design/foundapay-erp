@@ -120,7 +120,8 @@ function ClientForm({ client, onClose, onSaved }) {
         zelle_pct: parseFloat(form.zelle_pct) || 0,
         cheque_pct: parseFloat(form.cheque_pct) || 0,
         opening_balance: parseFloat(form.opening_balance) || 0,
-        balance_owed: parseFloat(form.balance_owed) || 0,
+        // balance_owed is now computed by the GET /api/clients SELECT (opening
+        // + Σ received_net − Σ sent_gross). Don't send a manual override.
         status: form.status, other_terms: form.other_terms, email: form.email, phone: form.phone, country: form.country,
       };
       if (client) await api.patch(`/api/clients/${client.id}`, payload);

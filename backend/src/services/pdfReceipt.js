@@ -319,15 +319,21 @@ function buildInvoice(inv, related = {}, stream) {
   const H = doc.page.height;
   const M = 40; // page margin
 
-  // ━━━ Header — purple gradient bar ━━━
-  doc.rect(0, 0, W, 110).fill(PURPLE);
+  // ━━━ Header — brand color bar (defaults to purple if no brand color) ━━━
+  // Hex colors from client_brands.brand_color override the platform purple.
+  const headerColor = sanitizeHex(related.brand_color) || PURPLE;
+  doc.rect(0, 0, W, 110).fill(headerColor);
   doc.rect(0, 100, W, 10).fill(PURPLE_DARK);
 
-  // Logo (entity > client) on the left
+  // Logo (brand → entity → client) on the left
   const logoPath = resolveLogoPath(related.logo_url);
   if (logoPath) {
     try { doc.image(logoPath, M, 22, { fit: [140, 56], align: 'left', valign: 'center' }); }
     catch { /* fallback to text below */ }
+  } else if (related.brand_name) {
+    // Render brand name as text on the header bar when no logo
+    doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(20)
+       .text(related.brand_name, M, 38, { width: 320, ellipsis: true });
   }
 
   // Issuer block (right side of header)
@@ -345,18 +351,27 @@ function buildInvoice(inv, related = {}, stream) {
   // ━━━ Issuer / customer parties — two columns ━━━
   let y = 130;
   const colW = (W - M * 2 - 20) / 2;
-  const issuerName = related.entity_name || related.client_name || 'FoundaPay';
+  // When a brand is set: brand is the primary issuer, entity gets a
+  // "Processed by ENTITY" subtitle. Otherwise fall through to entity → client.
+  const issuerName = related.brand_name || related.entity_name || related.client_name || 'FoundaPay';
 
   doc.fillColor(PURPLE).font('Helvetica-Bold').fontSize(9).text('FROM', M, y);
   doc.fillColor(TEXT_DARK).font('Helvetica-Bold').fontSize(13).text(issuerName, M, y + 14);
   doc.font('Helvetica').fontSize(10).fillColor(TEXT_MUTED);
   let yi = y + 32;
+  if (related.brand_name && related.entity_name && related.brand_name !== related.entity_name) {
+    doc.fillColor(TEXT_MUTED).fontSize(9)
+       .text(`Processed by ${related.entity_name}`, M, yi, { width: colW });
+    yi += 14;
+  }
+  if (related.brand_support_email) { doc.text(related.brand_support_email, M, yi); yi += 14; }
+  else if (related.entity_email)   { doc.text(related.entity_email, M, yi);        yi += 14; }
+  if (related.brand_support_phone) { doc.text(related.brand_support_phone, M, yi); yi += 14; }
+  else if (related.entity_phone)   { doc.text(related.entity_phone, M, yi);        yi += 14; }
   if (related.entity_address) {
     doc.text(String(related.entity_address).slice(0, 200), M, yi, { width: colW });
     yi += 28;
   }
-  if (related.entity_email)  doc.text(related.entity_email, M, yi),  yi += 14;
-  if (related.entity_phone)  doc.text(related.entity_phone, M, yi),  yi += 14;
 
   const col2X = M + colW + 20;
   doc.fillColor(PURPLE).font('Helvetica-Bold').fontSize(9).text('BILL TO', col2X, y);
@@ -467,6 +482,26 @@ function buildInvoice(inv, related = {}, stream) {
     y += 60;
   }
 
+  // ━━━ Statement-descriptor callout (chargeback mitigation) ━━━
+  // Sets the customer's expectation: "your card statement will read
+  // BRAND*DESCRIPTOR" so they don't dispute the charge as unrecognized.
+  if (related.brand_descriptor || related.brand_descriptor_note) {
+    const boxH = 50;
+    doc.rect(M, y, tableW, boxH).fill('#FFF7ED'); // soft-amber background
+    doc.fillColor('#9A3412').font('Helvetica-Bold').fontSize(9)
+       .text('STATEMENT DESCRIPTOR', M + 12, y + 10);
+    if (related.brand_descriptor) {
+      doc.fillColor(TEXT_DARK).font('Helvetica-Bold').fontSize(11)
+         .text(`Charge appears as ${related.brand_descriptor}`, M + 12, y + 22);
+    }
+    if (related.brand_descriptor_note) {
+      doc.fillColor(TEXT_MUTED).font('Helvetica').fontSize(9)
+         .text(String(related.brand_descriptor_note).slice(0, 200),
+               M + 12, y + 34, { width: tableW - 24 });
+    }
+    y += boxH + 8;
+  }
+
   // ━━━ Footer ━━━
   const footerY = H - 60;
   doc.rect(0, footerY, W, 60).fill(PURPLE_LIGHT);
@@ -477,6 +512,14 @@ function buildInvoice(inv, related = {}, stream) {
            M, footerY + 36, { width: W - M * 2, align: 'center' });
 
   doc.end();
+}
+
+// Lenient hex sanitizer — accepts #RGB / #RRGGBB / #RRGGBBAA. Rejects
+// anything else so we never feed PDFKit a bad color string.
+function sanitizeHex(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/);
+  return m ? `#${m[1]}` : null;
 }
 
 module.exports = { buildReceipt, buildStatement, buildInvoice };

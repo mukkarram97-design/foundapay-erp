@@ -319,8 +319,25 @@ input:-webkit-autofill:active {
 /* Recharts overrides */
 .recharts-tooltip-wrapper { outline: none !important; }
 
-/* Print */
+/* Print — hide chrome, expand content. Reports.jsx wraps the printable
+   region in default markup; the top header + sidebar carry common
+   classnames so we suppress them globally. Buttons + form inputs are
+   never useful on paper. .no-print is an opt-in escape hatch. */
 @media print {
-  body { background: white !important; color: black !important; }
-  aside, .no-print { display: none !important; }
+  body, html { background: white !important; color: black !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* Layout chrome */
+  aside, header, .no-print { display: none !important; }
+  /* Buttons / form inputs / kebab menus */
+  button:not(.fp-btn-print-keep),
+  input, select, textarea,
+  [role="menu"], [role="dialog"] { display: none !important; }
+  /* Cards / tables: drop shadow + borders so paper looks clean */
+  .fp-card { box-shadow: none !important; border: 1px solid #d4d4d8 !important; }
+  /* Don't break a table row across pages */
+  tr, .fp-card { page-break-inside: avoid; }
+  thead { display: table-header-group; }
+  tfoot, tr.totals-row { font-weight: 600; }
+  /* Allow the whole page width */
+  main, .max-w-\[1700px\], .max-w-\[1500px\], .max-w-\[1200px\] { max-width: 100% !important; padding: 0 !important; }
+  a { color: black !important; text-decoration: none; }
 }
